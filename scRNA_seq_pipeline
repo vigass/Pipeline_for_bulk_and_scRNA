@@ -1,0 +1,583 @@
+rm(list = ls())
+setwd("D:\\Datas\\scRNA_seq\\PDAC\\scRNA2")
+.libPaths(c("D:\\Datas\\scRNA_seq\\path\\SeuratV4", .libPaths()))
+library(stringr);library(dplyr);library(future);library(future.apply);
+library(msigdbr);library(stringr);library(clusterProfiler);library(devtools);
+library(harmony);library(cluster);library(ggplot2);library(reshape2)
+
+#options(future.globals.maxSize = 60000* 1024^2)#最大运行内存设置
+library(ggsci)
+cors <- pal_npg()(10)
+###Step1 读取数据###
+##自动读取10X数据，是一些tsv和mtx文件
+pbmc.data <- Read10X(data.dir = "D:\\Datas\\scRNA_seq\\test\\filtered_gene_bc_matrices\\hg19")
+pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200)
+pbmc
+##读取仅有一个稀缺矩阵
+matrix_data <- read.table("single_cell_datamatrix.txt",sep = "\t",header = T,row.names = 1)
+dim(matrix_data)
+seurat_obj <- CreateSeuratObject(counts = matrix_data)
+##读取RDS文件
+pbmc <- readRDS("panc8.rds")
+saveRDS(pbmc,"pbmc.rds")
+
+##读取多个数据
+## read 10X data and generate Seurat object
+#方法1
+seurat_objects <- list()
+for (file in c("GSM6567157", "GSM6567159", "GSM6567160")) {
+  seurat_data <- Read10X(data.dir = paste0("D:\\Datas\\scRNA_seq\\PDAC\\scRNA2\\", file))
+  seurat_obj <- CreateSeuratObject(counts = seurat_data, min.features = 100, project = file)
+  seurat_objects[[file]] <- seurat_obj
+}
+merged_seurat <- merge(seurat_objects[[1]],seurat_objects[-1],add.cell.ids = names(seurat_objects),project = 'PDAC')
+
+#方法2
+filename <- paste('D:\\Datas\\scRNA_seq\\PDAC\\scRNA2\\',list.files("D:\\Datas\\scRNA_seq\\PDAC\\scRNA2\\"),sep='')
+sceList <- lapply(filename, function(x){
+  obj <- CreateSeuratObject(counts = Read10X(x),
+                            min.cell = 3, min.features = 50,
+                            project = str_split(x,'\\')[1][2])
+})
+names(sceList) <- list.files('D:\\Datas\\scRNA_seq\\PDAC\\scRNA2\\')
+merged_seurat <- merge(sceList[[1]],sceList[-1],add.cell.ids = names(sceList),project = 'PDCA')
+dim(merged_seurat)
+
+###Step2 质量控制###
+head(merged_seurat@meta.data)
+### Compute complexity (number of genes per UMI for each cell)(计算复杂度(每个细胞的每个 UMI 的基因数量))
+merged_seurat$log10GenesPerUMI <- log10(merged_seurat$nFeature_RNA)/log10(merged_seurat$nCount_RNA)
+### Compute mitochondrial ratio(线粒体基因比值)
+merged_seurat$mitoRatio <- PercentageFeatureSet(object = merged_seurat, pattern = "^MT-")/100
+# Add cell IDs to metadata(将单元格 ID 添加到元数据)
+metadata <- merged_seurat@meta.data
+metadata$cells <- substr(rownames(metadata), 13, nchar(rownames(metadata)))
+# Create sample column(创建样本列)
+metadata$sample <- NA
+metadata$sample[which(str_detect(metadata$orig.ident, "57"))] <- "PDCA1"
+metadata$sample[which(str_detect(metadata$orig.ident, "59"))] <- "PDCA2"
+metadata$sample[which(str_detect(metadata$orig.ident, "60"))] <- "PDCA3"
+merged_seurat@meta.data <- metadata
+ggplot(merged_seurat@meta.data, aes(x=nCount_RNA, y=nFeature_RNA, color=mitoRatio)) +
+  geom_point() +
+  scale_colour_gradient(low = "gray90", high = "black") +
+  stat_smooth(method = lm) +
+  scale_x_log10() +
+  scale_y_log10() +
+  theme_classic() +
+  geom_vline(xintercept = 500) +
+  geom_hline(yintercept = 250) +
+  facet_wrap(~sample)
+filtered_seurat <- subset(x = merged_seurat,subset= (nCount_RNA >= 500) &
+                            (nFeature_RNA >= 250) & (log10GenesPerUMI > 0.80) &
+                            (mitoRatio < 0.20))
+counts <- GetAssayData(object = filtered_seurat, assay = "RNA",slot = "counts")
+
+# Only keeping those genes expressed in more than 10 cells(只保留那些在10个以上细胞中表达的基因)
+keep_genes <- Matrix::rowSums(counts > 0) >= 10
+filtered_counts <- counts[keep_genes, ]
+# Reassign to filtered Seurat object(重新分配给过滤后的 Seurat 对象)
+filtered_seurat <- CreateSeuratObject(filtered_counts, meta.data = filtered_seurat@meta.data)
+
+#step4 normalize(标准化)
+## remove cell cycle effect(消除细胞周期效应)
+seurat_phase <- NormalizeData(filtered_seurat)
+# Load cell cycle markers (https://github.com/satijalab/seurat/blob/master/data/)
+load("cc.genes.updated.2019.rda")
+# Score cells for cell cycle(对细胞周期进行评分)
+seurat_phase <- CellCycleScoring(seurat_phase,
+                                 g2m.features=cc.genes.updated.2019$g2m.genes,
+                                 s.features = cc.genes.updated.2019$s.genes)
+# Identify the most variable genes(识别变异最大的基因)
+seurat_phase <- FindVariableFeatures(seurat_phase,
+                                     selection.method = "vst",
+                                     nfeatures = 2000,
+                                     verbose = FALSE)
+# Scale the counts
+seurat_phase <- ScaleData(seurat_phase)
+# Perform PCA
+seurat_phase <- RunPCA(seurat_phase)
+# Plot the PCA colored by cell cycle phase
+DimPlot(seurat_phase,reduction = "pca",group.by= "Phase",split.by = "Phase")
+#去批次效应()
+#Harmony去批次
+library(harmony)
+seurat_phase <- RunHarmony(seurat_phase,group.by.vars = "orig.ident")
+DimPlot(seurat_phase,reduction = 'harmony',group.by = "orig.ident")
+ElbowPlot(seurat_phase,reduction = "harmony")
+
+#细胞聚类
+seurat_phase <- FindNeighbors(seurat_phase,dims = 1:4,reduction = "harmony")
+seurat_phase <- FindClusters(seurat_phase)
+seurat_phase <- RunUMAP(seurat_phase,dims = 1:4,reduction = 'harmony')
+
+#去批次后绘制聚类图
+DimPlot(seurat_phase,reduction = "umap", label = T, group.by = 'seurat_clusters')
+DimPlot(seurat_phase,reduction = "umap", label = T, split.by  = 'sample')
+
+saveRDS(seurat_phase,"seurat_phase.rds")
+
+seurat_phase <- readRDS("PDCA.rds")
+###细胞注释###
+#(适用于非参数检验)
+all_markers <- FindAllMarkers(seurat_phase, 
+                          test.use = "wilcox",  #检验方法
+                          min.pct = 0.1,        #至少一个群体中表达的细胞的最小百分比
+                          thresh.use = 0.25,    #所有群体中至少一个群体中表达的细胞的比例阈值
+                          logfc.threshold = 0.5)#因表达差异的对数折叠变化阈值
+
+Idents(seurat_phase) = seurat_phase$seurat_clusters
+
+###细胞类型分类###
+#genes <- c("EPCAM","KRT8","KRT18","KRT19",     #Epithelial cells(上皮细胞)
+           "PTPRC","CD3D",                     #T cells
+           "CD3E","CD19",                      #B cells
+           "CD14", "CD68",                     #Monocytes cells(单核细胞)
+           "CDH5","PECAM1","FLT1","KDR",       #Endothelial cells(内皮细胞)
+           "COL1A1","COL1A2","DCN","LUM",      #Fibroblasts(成纤维细胞)
+           "ACTA2","CALD1","MYH11",            #Smooth muscle cells(平滑肌细胞)
+           "RBFOX3","SNAP25","SYN1",           #Neurons(神经元细胞)
+           "AQP4","GFAP","S100B" )             #Glial cells(星形胶质细胞)
+           
+gene_maker <- c(
+  "CD19","MS4A1","CD79A",       #B cells
+  "IGHG1","IGHA1","JCHAIN",     #Plasma cells
+  "CD27","TNFRSF13B",           #Memory B cells
+  
+  "CD3D","CD3E","CD3G",         #T cells
+  "CD4",'IL7R',"FOXP3",         #CD4+ T cells
+  "CTLA4","ICOS",               #Regulatory T cells
+  "CD8A","CD8B","CCL5",         #CD8+ T cells
+  "GZMB", "PRF1",               #Cytotoxic T cells
+  
+  "GNLY","FGFBP2","NCR1",       #NK cells
+  "XCL1", "XCL2",               #Activated NK cells
+  
+  "ITGAX","CD14","CD68",        #Myelaid cells
+  "CCR2", "LYZ",                #Monocytes
+  "FCGR3A", "CSF1R",            #Macrophages
+  
+  "TPSAB1","TPSB2","KIT",       #Mast cells
+  
+  "PECAM1","CLDN5","RAMP2",     #Endothelial cells
+  "VWF", "CDH5",                #Vascular endothelial cells
+  
+  "DCN","LUM","PDGFRA",         #Fibroblast
+  
+  "RGS5","PDGFRB","ACTA2",      #Mural cells
+  "CNN1", "TAGLN",              #Vascular smooth muscle cells
+  
+  "CDH19","PLP1","SOX10",       #Glial cells
+  "MBP", "MOG",                 #Oligodendrocytes
+  "GFAP", "AQP4",               #Astrocytes
+  
+  "PGC","PGA3","MUC5AC"         #Epithelial
+  )         
+
+DotPlot(seurat_phase,features = gene_maker,group.by = "seurat_clusters")+coord_flip()
+
+                               
+
+#确定细胞类型
+celltype = c("Lymphocytes","Mast cells","Lymphocytes",
+             "Repair Fibroblasts","Memory Cytotoxic T cells",
+             "Synthetic CAFs","Neutrophils","Stratified Columnar Epithelial Cells",
+             "Vascular Smooth Muscle Cells","Epithelial cells",
+             "Macrophages","Macrophages","Epithelial ductal cells",
+             "Fibroblasts","Vascular endothelial cells",
+             "Myofibroblastic cancer-associated fibroblasts","Schwann cells",
+             "Endothelial cells","Myofibroblastic cancer-associated fibroblasts"
+  
+)
+names(celltype) <- levels(seurat_phase)
+seurat_phase <- RenameIdents(seurat_phase,celltype)
+
+seurat_phase@meta.data$celltype <- Idents(seurat_phase)
+DimPlot(seurat_phase,reduction = "umap", label = T, group.by = 'celltype')
+
+#保存文件
+saveRDS(seurat_phase,"PDCA_celltype.rds")
+seurat_phase <- readRDS("PDCA_celltype.rds")
+
+###细胞比例###
+library(reshape)
+library(ggplot2)
+#define the colors
+library(ggsci)
+cors <- pal_igv()(16)
+#添加绘图数据
+prop_df <- table(seurat_phase$celltype,seurat_phase$sample) %>% reshape2::melt()
+colnames(prop_df) <- c("Cluster","Sample","Number")
+prop_df$Cluster <- factor(prop_df$Cluster)
+prop_df$Proportion <- ave(prop_df$Number,prop_df$Sample,
+                          FUN = function(x) x/sum(x))
+#绘图
+#比例图
+ggplot(data = prop_df, aes(x = Number , y = Sample , fill = Cluster))+
+  geom_bar(stat = "identity", width = 0.8, position = "fill")+
+  scale_fill_manual(values = cors)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  labs(x = "", y = "Ratio")+
+  theme(axis.text.y = element_text(size = 12, colour = "black"))+
+  theme(axis.text.x = element_text(size = 12, colour = "black"))+
+  theme(
+    axis.title.x.bottom = element_text(hjust = 1, vjust = 1, angle = 45)
+  )
+ggsave(file = "PDCA_proportion_barplot1.pdf",width = 12, height = 6)
+#柱状图
+ggplot(prop_df, aes(x = Cluster, y = Proportion, fill = Sample))+
+  geom_col(position = position_dodge(0.8), width = 0.8)+
+  scale_fill_manual(values = c("#3C5488","#F39B7F","#4DBBD5","#E64B35"))+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  labs(x = "", y = "Ratio")+
+  theme(axis.title.y = element_text(size = 12, colour = "black"))+
+  theme(axis.title.x = element_text(size = 12, colour = "black"))+
+  theme(axis.text.x.bottom = element_text(hjust = 1, vjust = 1, angle = 45))
+ggsave(file = "PDCA_proportion_barplot2.pdf",width = 12, height = 6)
+###批量散点图
+#计算个组个样本不同细胞群比例
+Cellratio <- prop.table(table(Idents(seurat_phase), seurat_phase$orig.ident), margin = 2)
+Cellratio <- data.frame(Cellratio)
+colnames(Cellratio) <- c("Celltype","Sample","Freq")
+Cellratio$group <- ifelse(Cellratio$Sample == "GSM6567157", "PDCA1",
+                          ifelse(Cellratio$Sample == "GSM6567159", "PDCA2", "PDCA3"))
+my_comparisons <- list(c("PDCA1","PDCA2","PDCA3"))
+#box图
+library(ggpubr)
+pdf(file = "PDCA_box_proportion_boxplot.pdf",width = 8, height = 3.5)
+ggboxplot(Cellratio, x = 'group', y = 'Freq', width = 0.6, 
+          color = 'black',
+          fill = 'group',
+          palette = cors,
+          xlab = F, 
+          bxp.errorbar = T, 
+          bxp.errorbar.width = 0.5, 
+          size = 0.5,
+          outlier.shape = NA, 
+          legend = 'right')+
+  facet_wrap(~celltype, ncol = 6, scales = 'free_y')+
+  geom_jitter(size = 1)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  theme(panel.border = element_rect(colour = 'black', fill = NA))+
+  #stat_compare_means(comparisons = my_comparisons, method = 't.test')#统计学检验
+dev.off()
+  
+rm(list = ls()) 
+library(ggsci)
+cors <- pal_igv()(18)
+#细胞类群差异分析
+seurat_phase <- readRDS("PDCA_celltype.rds")
+#计算细胞所有差异基因
+all_makers <- FindAllMarkers(seurat_phase, 
+                             only.pos = F,#改为True只能输出高表达基因
+                             min.pct = 0.25,
+                             logfc.threshold = 0.5)
+write.csv(all_makers,file = "all_makers.csv")
+all_makers <- read.csv("all_makers.csv",row.names = 1)
+
+#联合bulk
+genes <- c("GAPDH","FN1","ALB","COL1A1","COL1A2")
+FeaturePlot(seurat_phase,features = genes)
+
+
+#提取个亚群Top5 Maker
+library(dplyr)
+top5_makers <- all_makers %>% group_by(cluster) %>% top_n(5,avg_log2FC)
+#各亚群平均表达量
+genes <- unique(top5_makers$gene)
+aver_dt <- AverageExpression(seurat_phase,
+                             features = genes,
+                             group.by = 'celltype',
+                             slot = 'data')
+aver_dt <- as.data.frame(aver_dt$RNA)
+  
+#heatmap
+library(ComplexHeatmap)
+mycol <- colorRampPalette(c('#4dbbd5ff','white','#e64b33ff'))(50)
+celltype_col <- cors[1:16]
+
+top5_makers <- top5_makers[!duplicated(top5_makers$gene),]
+gene_anno <- data.frame(gene_anno = top5_makers$cluster,
+                        row.names = top5_makers$gene)
+cell_anno <- data.frame(cell_nano = colnames(aver_dt),
+                        row.names = colnames(aver_dt))
+names(celltype_col) <- cell_anno$cell_nano
+anno_col <- list(cell_anno = celltype_col, gene_anno = celltype_col)
+
+pdf(file = "PDCA_DEGtop5_heatmap.pdf",height = 16, width = 20)
+pheatmap(as.matrix(aver_dt),
+         scale = 'row',
+         cluster_rows = F,
+         cluster_cols = F,
+         annotation_col = cell_anno,
+         annotation_row = gene_anno,
+         annotation_colors = anno_col,
+         color = mycol,
+         border_color = 'white')
+dev.off() 
+
+###组间单细胞差异分析###
+##1.pseudobulks差异分析##
+#提取某类亚型细胞的差异基因
+deg_lym <- subset(seurat_phase, celltype == "Lymphocytes"&sample %in% c('PDCA1','PDCA3'))
+bs = split(colnames(deg_lym),deg_lym$orig.ident)
+exprSet = do.call(
+  cbind, lapply(names(bs), function(x){
+    kp = colnames(deg_lym) %in% bs[[x]]
+    rowSums(as.matrix(deg_lym@assays$RNA$counts[,kp]))
+  })
+)
+colnames(exprSet) <- names(bs)
+phe = unique(deg_lym@meta.data[,c('orig.ident','sample')])
+group_list = phe[match(names(bs),phe$orig.ident),'sample']
+exprSet = exprSet[apply(exprSet,1,function(x) sum(x>1)>1),]
+table(group_list)
+#构建DEseq对象
+library(DESeq2)
+colData <- data.frame(row.names = colnames(exprSet),group_list = group_list)
+dds <- DESeqDataSetFromMatrix(countData = round(exprSet),
+                              colData = colData,
+                              design = ~ group_list)
+#进行差异分析
+dds2 <- DESeq(dds)
+table(group_list)
+tmp <- results(dds2, contrast = c('group_list','Normal','PDCA'))#自定分组
+DEG_DESeq2 <- as.data.frame(tmp[order(tmp$padj),])
+DEG_DESeq2 = na.omit(DEG_DESeq2)
+#添加上下调信息
+DEG_DESeq2 <- DEG_DESeq2 %>%
+  mutate(Type = if_else(pvalue >0.05,'ns',
+                        if_else(abs(log2FoldChage) < 0.25,'ns',
+                                if_else(log2FoldChage >= 0.25, 'up','down')))) %>%
+  arrange(desc(abs(log2FoldChage))) %>% rownames_to_column('Gene_Symbol')
+table(DEG_DESeq2$Type)
+write.csv(DEG_DESeq2,"Mast_DEGs.csv")
+
+##Findmakers差异分析##
+seurat_phase <- readRDS("PDCA_celltype.rds")
+names(seurat_phase@meta.data)
+unique(seurat_phase$sample)
+
+seurat_phase$celltype.group <- paste(seurat_phase$celltype, seurat_phase$sample, sep = '_')
+Idents(seurat_phase) <-  "celltype.group"
+
+#选择亚群进行分析比较
+#ident.1是要去比较的组(Disease),ident.2是被比较的组(Control)
+CELLDEG <- FindMarkers(seurat_phase,ident.1 = 'Lymphocytes_PDCA1',
+                                    ident.2 = 'Lymphocytes_PDCA3',
+                       verbose = F, test.use = 'wilcox', min.pct = 0.1)
+library(dplyr)
+library(tidyverse)
+CELLDEG <- CELLDEG %>%
+  mutate(Type = if_else(p_val >0.05,'state',
+                        if_else(abs(avg_log2FC) < 1.5,'state',
+                                if_else(avg_log2FC >= 1.5, 'up','down')))) %>%
+  arrange(desc(abs(avg_log2FC))) %>% rownames_to_column('Gene_Symbol')
+table(CELLDEG$Type)
+write.csv(CELLDEG,"Lymphocytes.csv")
+
+
+#volcanoplot
+ggplot(CELLDEG,aes(avg_log2FC,
+                   -log10(p_val)))+
+  geom_point(size = 3.5, 
+             alpha = 0.8, 
+             aes(color = Type),
+             show.legend = T)+
+  scale_color_manual(values = c('#35d315','gray','#e64c46'))+
+  ylim(0, 200)+
+  xlim(-8, 8)+
+  labs(x = 'Log2(Fold Change)',y = '-Log(Padj)')+
+  geom_hline(yintercept = -log10(0.05),
+             linetype = 2,
+             color = 'black',lwd = 0.8)+
+  geom_vline(xintercept = c(-1.5, 1.5),
+             linetype = 2, 
+             color = 'black', lwd = 0.8)+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+  
+Idents(seurat_phase) <-  "celltype"
+top5 <- subset(top5_makers, cluster == 'Lymphocytes')$gene
+#小提琴图
+VlnPlot(seurat_phase,features = top5, group.by = 'celltype',cols = cors, pt.size = 0)
+VlnPlot(seurat_phase,features = top5, group.by = 'sample', idents = 'Lymphocytes', cols = cors, pt.size = 0)
+#气泡图
+DotPlot(seurat_phase, features = top5,group.by = 'sample',idents = 'Lymphocytes', cols = cors)
+#Umap
+FeaturePlot(seurat_phase,features = top5)
+
+###关键通路富集分析
+##1. GSVA##
+library(GSVA)
+genes <- unique(rownames(seurat_phase@assays$RNA$counts))
+aver_dt <- AverageExpression(seurat_phase,
+                             features = genes,
+                             group.by = 'celltype',
+                             slot = 'data')
+aver_dt <- as.data.frame(aver_dt$RNA)
+aver_dt <- aver_dt[rowSums(aver_dt)>0, ]
+
+##选择msigdb的KEGG基因应
+geneSet = msigdbr(species = 'Homo sapiens')#category = 'C2'
+geneSet %>% dplyr::distinct(gs_cat, gs_subcat) %>% dplyr::arrange(gs_cat, gs_subcat)
+#挑选感兴趣的基因集,主流通路/NO/ROS/衰老/自噬/线粒体
+geneSet_name = c("KEGG_PARKINSONS_DISEASE",
+                 "KEGG_MAPK_SIGNALING_PATHWAY",
+                 "KEGG_HEDGEHOG_SIGNALING_PATHWAY",
+                 "KEGG_NOTCH_SIGNALING_PATHWAY",
+                 "KEGG_WNT_SIGNALING_PATHWAY",
+                 "KEGG_OXIDATIVE_PHOSPHORYLATION",
+                 "KEGG_TGF_BETA_SIGNALING_PATHWAY",
+                 "KEGG_P53_SIGNALING_PATHWAY",
+                 "KEGG_CHEMOKINE_SIGNALING_PATHWAY",
+                 #'KEGG_ANTIGEN_PROCESSING_AND_PRESENTATION,'
+                 "REACTOME_STING_MEDIATED_INDUCTION_OF_HOST_IMMUNE_RESPONSES",
+                 "REACTOME_CYTOKINE_SIGNALING_IN_IMMUNE_SYSTEM",
+                 "REACTOME_CELLULAR_SENESCENCE",
+                 "BIOCARTA_NOS1_PATHWAY",
+                 "BIOCARTA_IFNG_PATHWAY",
+                 "GOBP_RESPONSE_TO_OXIDATIVE_STRESS",
+                 #'GOBP_T_CELL_MEDIATED_CYTOTOXICITY,'
+                 "GOBP_AUTOPHAGY_OF_MITOCHONDRION",
+                 "GOBP_RESPONSE_TO_TYPE_I_INTERFERON",
+                 "WP_FERROPTOSIS",
+                 "BIOCARTA_CYTOKINE_PATHWAY")
+geneSet = subset(geneSet, gs_name %in% geneSet_name)
+geneSet = geneSet %>% split(x = .$gene_symbol, f = .$gs_name)
+
+##GSVA分析
+library(GSVA)
+exp_gsva <- gsva(as.matrix(aver_dt),
+                 gset.idx.list = geneSet, #method = c('gsva','ssgsea','zscore','plage')
+                 min.sz = 20)              #min.sz是指定基因集中最小基因数的阈值
+
+#选择相应表达水平中位绝对偏差中位数排名前20的通路
+mad_scores <- apply(exp_gsva, 1, mad)
+top_genes <- order(mad_scores, decreasing = T)[1:17]
+exp_gsva_top <- exp_gsva[top_genes,]
+
+#heatmap
+library(pheatmap)
+#添加注释
+annotation_col = data.frame(group = levels(seurat_phase$celltype))
+rownames(annotation_col) <- colnames(exp_gsva_top)
+#可视化
+pdf('GSVA_top20_pathway.pdf', width = 20,height = 12)
+pheatmap::pheatmap(exp_gsva_top,
+                   show_colnames = F,
+                   show_rownames = T,
+                   cluster_rows = F,
+                   cluster_cols = F,
+                   color = cors,
+                   annotation_col = annotation_col)
+dev.off()
+
+##2. AUCell
+library(AUCell)#BiocManager::install("AUCell")
+cells_AUC <- AUCell_run(seurat_phase@assays$RNA$data, geneSet)
+
+#提取pathway
+my_geneSet <-  "KEGG_PARKINSONS_DISEASE"
+AUcell_auc <- as.numeric(getAUC(cells_AUC)[my_geneSet, ])
+seurat_phase$AUCell <- AUcell_auc
+head(seurat_phase@meta.data)
+
+#可视化
+#小提琴图
+cors= pal_igv()(20)
+VlnPlot(seurat_phase, features = 'AUCell', pt.size = 0, group.by = 'celltype', cols = cors)
+
+#umap
+library(ggrepel)
+umap <- data.frame(seurat_phase@meta.data, seurat_phase@reductions$umap@cell.embeddings)
+library(ggplot2)
+seurat_phase$UMAP_1 <- umap$UMAP_1
+seurat_phase$UMAP_2 <- umap$UMAP_2
+mydata <- FetchData(seurat_phase, vars = c('UMAP_1','UMAP_2','AUCell'))
+#可视化
+ggplot(mydata, aes(x = UMAP_1, y = UMAP_2, colour = AUCell))+
+  geom_point(size = 1)+scale_color_gradientn(values = seq(0, 1, 0.2),
+                                             colors = c("#2166AC",'#478ABF','#90C0DC', 
+                                                        "white",'#EF8C65','#CF4F45',"#B2182B"))+
+  theme_bw()+ 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(color = 'black'),
+        panel.border = element_rect(fill = NA, colour = 'black', linewidth = 1,linetype = 'solid'))
+VlnPlot(seurat_phase,features = 'AUCell',group.by = 'celltype')
+#感兴趣通路基因散点图
+#各亚群评价表达量提取
+genes = unique(geneSet$KEGG_MAPK_SIGNALING_PATHWAY) %>% data.frame()
+colnames(genes) = 'gene'
+genes = genes %>% dplyr::filter(grepl('ST', genes$gene))
+
+DotPlot(seurat_phase, features = genes$gene, group.by = 'celltype', assay = 'RNA')+
+  coord_flip()+
+  theme(panel.grid = element_blank(),
+        axis.title.x = element_text(angle = 45, hjust = 1, vjust = 1))+
+  labs(x = NULL, y = NULL)+
+  guides(size = guide_legend("Percent Expression"))+
+  scale_color_gradientn(colours = c('#3c5588ff',"#4dbbccff","#f39b7eee","#e64b36ff"))
+
+
+##3AddMouduleScore
+seurat_LymF <- subset(seurat_phase, celltype == 'Lymphocytes')
+features_1 <- list(c('IL1A','IL1B','IL6','NOS2','TLR2','TLR4','CD80','CD86'))#需要真实的基因symbol
+features_2 <- list(c('CD115','CD206','PPARG','ARG1','CD163','CD301','IL4R','PDL2'))
+
+#打分
+seurat_Lym <- AddModuleScore(seurat_LymF, 
+                            features = features_1,
+                            ctrl = 100, 
+                            name = 'Lymphocytes_features')
+
+head(seurat_LymF@meta.data)
+colnames(seurat_LymF@meta.data)[14] <- 'Lymphocytes_Score'
+
+
+###细胞通讯
+#cellchat
+#install.packages("BiocManager")
+#BiocManager::install("BiocNeighbors")
+#devtools::install_github("sqjin/CellChat")
+rm(list=ls())
+seurat_phase <- readRDS("PDCA_celltype.rds")
+library(CellChat)
+library(patchwork)
+library(future)
+options(stringsAsFactors = FALSE)
+data.input  <- seurat_phase@assays$RNA@data
+identity = data.frame(group =seurat_phase$celltype, 
+                      row.names = names(seurat_phase$celltype)) 
+# create a dataframe consisting of the cell labels
+unique(identity$group) # check the cell labels
+rownames(data.input) <- colnames(identity)
+cellchat <- createCellChat(object = seurat_phase, meta = seurat_phase@meta.data, group.by = "celltype")
+cellchat <- addMeta(cellchat, meta = seurat_phase@meta.data)
+cellchat <- setIdent(cellchat, ident.use = "celltype") 
+levels(cellchat@idents)
+groupSize <- as.numeric(table(cellchat@idents))
+
+CellChatDB <- CellChatDB.human # use CellChatDB.mouse if running on mouse data
+showDatabaseCategory(CellChatDB)
+
+dplyr::glimpse(CellChatDB$interaction)
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling") # use Secreted Signaling
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat)
+future::plan("multicore", workers = 4)
+
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+cellchat <- projectData(cellchat, PPI.human)
+
+cellchat <- computeCommunProb(cellchat, raw.use = TRUE)
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+
+
+
