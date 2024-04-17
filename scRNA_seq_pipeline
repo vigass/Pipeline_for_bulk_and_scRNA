@@ -334,6 +334,9 @@ dev.off()
 # Step7 组间单细胞差异分析 ------------------------------------------------------------------
 ##1.pseudobulks差异分析##
 #提取某类亚型细胞的差异基因
+rm(list=ls())
+seurat_phase <- readRDS("PDCA_celltype.rds")
+
 deg_lym <- subset(seurat_phase, celltype == "Lymphocytes"&sample %in% c('PDCA1','PDCA3'))
 bs = split(colnames(deg_lym),deg_lym$orig.ident)
 exprSet = do.call(
@@ -368,7 +371,8 @@ DEG_DESeq2 <- DEG_DESeq2 %>%
 table(DEG_DESeq2$Type)
 write.csv(DEG_DESeq2,"Mast_DEGs.csv")
 
-##Findmakers差异分析##
+##2.Findmakers差异分析##
+rm(list=ls())
 seurat_phase <- readRDS("PDCA_celltype.rds")
 names(seurat_phase@meta.data)
 unique(seurat_phase$sample)
@@ -412,8 +416,13 @@ ggplot(CELLDEG,aes(avg_log2FC,
   theme(panel.grid.major = element_blank(),
         panel.grid.minor = element_blank())
 
-Idents(seurat_phase) <-  "celltype"
+Idents(seurat_phase) <- "celltype"
+all_makers <- read.csv("all_makers.csv",row.names = 1)
+top5_makers <- all_makers %>% group_by(cluster) %>% top_n(5,avg_log2FC)
+top5_makers <- top5_makers[!duplicated(top5_makers$gene),]
 top5 <- subset(top5_makers, cluster == 'Lymphocytes')$gene
+library(ggsci)
+cors <- pal_igv()(18)
 #小提琴图
 VlnPlot(seurat_phase,features = top5, group.by = 'celltype',cols = cors, pt.size = 0)
 VlnPlot(seurat_phase,features = top5, group.by = 'sample', idents = 'Lymphocytes', cols = cors, pt.size = 0)
@@ -421,10 +430,14 @@ VlnPlot(seurat_phase,features = top5, group.by = 'sample', idents = 'Lymphocytes
 DotPlot(seurat_phase, features = top5,group.by = 'sample',idents = 'Lymphocytes', cols = cors)
 #Umap
 FeaturePlot(seurat_phase,features = top5)
-
+saveRDS(seurat_phase,"PDCA_celltype.rds")
 
 # Step8 关键通路富集分析 ------------------------------------------------------------------
 ##1. GSVA##
+rm(list = ls())
+seurat_phase <- readRDS("PDCA_celltype.rds")
+library(ggsci)
+cors <- pal_igv()(18)
 library(GSVA)
 genes <- unique(rownames(seurat_phase@assays$RNA$counts))
 aver_dt <- AverageExpression(seurat_phase,
@@ -491,6 +504,8 @@ pheatmap::pheatmap(exp_gsva_top,
 dev.off()
 
 ##2. AUCell
+library(ggsci)
+cors <- pal_igv()(18)
 library(AUCell)#BiocManager::install("AUCell")
 cells_AUC <- AUCell_run(seurat_phase@assays$RNA$data, geneSet)
 
@@ -552,7 +567,95 @@ head(seurat_LymF@meta.data)
 colnames(seurat_LymF@meta.data)[14] <- 'Lymphocytes_Score'
 
 
-# Step9 细胞通讯分析 ------------------------------------------------------------
+
+# Step9 拟时序分析 -------------------------------------------------------------
+rm(list=ls())
+seurat_phase <- readRDS("PDCA_celltype.rds")
+DimPlot(seurat_phase,reduction = "umap", label = T, group.by = 'celltype')
+
+library(monocle)#BiocManager::install('monocle')
+Mast_mono <- subset(seurat_phase, celltype == "Mast cells")
+
+data <- as.matrix(Mast_mono@assays$RNA$counts,'sparseMatrix')
+pd <- new('AnnotatedDataFrame', data = Mast_mono@meta.data)
+fData <- data.frame(gene_short_name = row.names(data), row.names = row.names(data))
+fd <- new('AnnotatedDataFrame', data = fData)
+
+monocle_cds <- newCellDataSet(data,
+                              phenoData = pd,
+                              featureData = fd,
+                              expressionFamily = negbinomial.size())
+monocle_cds <- estimateSizeFactors(monocle_cds)
+monocle_cds <- estimateDispersions(monocle_cds)
+
+disp_table <- dispersionTable(monocle_cds)
+unsup_clustering_genes <- subset(disp_table, mean_expression >= 0.1)
+monocle_cds <- setOrderingFilter(monocle_cds, unsup_clustering_genes$gene_id)
+plot_ordering_genes(monocle_cds) 
+plot_pc_variance_explained(monocle_cds, return_all = F) # norm_method='log'
+monocle_cds <- reduceDimension(monocle_cds, max_components = 2, num_dim = 12,
+                       reduction_method = 'tSNE', verbose = T)
+monocle_cds <- clusterCells(monocle_cds, num_clusters = 6) 
+plot_cell_clusters(monocle_cds, 1, 2 )
+table(pData(monocle_cds)$Cluster) 
+colnames(pData(monocle_cds)) 
+table(pData(monocle_cds)$Cluster,pData(monocle_cds)$RNA_snn_res.0.8)
+plot_cell_clusters(monocle_cds, 1, 2 )
+save(monocle_cds,file = 'input_monocle_cds.Rdata')
+
+colnames(pData(monocle_cds))
+table(pData(monocle_cds)$Cluster)
+table(pData(monocle_cds)$Cluster,pData(monocle_cds)$RNA_snn_res.0.8)
+plot_cell_clusters(monocle_cds, 1, 2 )
+
+pData(monocle_cds)$Cluster = pData(monocle_cds)$RNA_snn_res.0.8
+Sys.time()
+diff_test_res <- differentialGeneTest(monocle_cds,
+                                      fullModelFormulaStr = "~Cluster")
+Sys.time()
+
+sig_genes <- subset(diff_test_res, qval < 0.1)
+sig_genes=sig_genes[order(sig_genes$pval),]
+head(sig_genes[,c("gene_short_name", "pval", "qval")] ) 
+cg=as.character(head(sig_genes$gene_short_name)) 
+
+# 第一步: 挑选合适的基因. 有多个方法，例如提供已知的基因集，这里选取统计学显著的差异基因列表
+ordering_genes <- row.names (subset(diff_test_res, qval < 0.01))
+ordering_genes
+monocle_cds <- setOrderingFilter(monocle_cds, ordering_genes)
+plot_ordering_genes(monocle_cds)
+monocle_cds <- reduceDimension(monocle_cds, max_components = 2,
+                       method = 'DDRTree')
+# 第二步: 降维。降维的目的是为了更好的展示数据。函数里提供了很多种方法,
+# 不同方法的最后展示的图都不太一样, 其中“DDRTree”是Monocle2使用的默认方法
+monocle_cds <- reduceDimension(monocle_cds, max_components = 2,
+                       method = 'DDRTree')
+# 第三步: 对细胞进行排序
+monocle_cds <- orderCells(monocle_cds)
+# 最后两个可视化函数，对结果进行可视化
+plot_cell_trajectory(monocle_cds, color_by = "Cluster")  
+ggsave('monocle_cell_trajectory_for_Cluster.pdf')
+
+length(cg)
+plot_genes_in_pseudotime(monocle_cds[cg,],
+                         color_by = "Cluster") 
+ggsave('monocle_plot_genes_in_pseudotime_for_Cluster.pdf')
+
+# https://davetang.org/muse/2017/10/01/getting-started-monocle/
+
+my_cds_subset=monocle_cds
+# pseudotime is now a column in the phenotypic data as well as the cell state
+head(pData(my_cds_subset))
+# 这个differentialGeneTest会比较耗费时间
+my_pseudotime_de <- differentialGeneTest(my_cds_subset,
+                                         fullModelFormulaStr = "~sm.ns(Pseudotime)",
+                                         cores = 1)
+
+head(my_pseudotime_de)
+save( my_cds_subset,my_pseudotime_de,file = 'output_of_monocle.Rdata')
+
+
+# Step10 细胞通讯分析 ------------------------------------------------------------
 #cellchat
 #install.packages("BiocManager")
 #BiocManager::install("BiocNeighbors")
