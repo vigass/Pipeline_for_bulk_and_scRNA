@@ -1,49 +1,35 @@
 rm(list = ls())
-setwd("D:\\Datas\\scRNA_seq\\PDAC\\scRNA2")
-.libPaths(c("D:\\Datas\\scRNA_seq\\path\\SeuratV4", .libPaths()))
+setwd("D:\\Datas\\scRNA_seq\\001")
 library(stringr);library(dplyr);library(future);library(future.apply);
 library(msigdbr);library(stringr);library(clusterProfiler);library(devtools);
-library(harmony);library(cluster);library(ggplot2);library(reshape2)
+library(harmony);library(cluster);library(ggplot2);library(reshape2);library(Seurat)
 
-#options(future.globals.maxSize = 60000* 1024^2)#最大运行内存设置
-library(ggsci)
-cors <- pal_npg()(10)
-###Step1 读取数据###
-##自动读取10X数据，是一些tsv和mtx文件
-pbmc.data <- Read10X(data.dir = "D:\\Datas\\scRNA_seq\\test\\filtered_gene_bc_matrices\\hg19")
-pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200)
-pbmc
-##读取仅有一个稀缺矩阵
-matrix_data <- read.table("single_cell_datamatrix.txt",sep = "\t",header = T,row.names = 1)
-dim(matrix_data)
-seurat_obj <- CreateSeuratObject(counts = matrix_data)
-##读取RDS文件
-pbmc <- readRDS("panc8.rds")
-saveRDS(pbmc,"pbmc.rds")
 
-##读取多个数据
-## read 10X data and generate Seurat object
+# Step1 读取数据 --------------------------------------------------------------
 #方法1
 seurat_objects <- list()
-for (file in c("GSM6567157", "GSM6567159", "GSM6567160")) {
-  seurat_data <- Read10X(data.dir = paste0("D:\\Datas\\scRNA_seq\\PDAC\\scRNA2\\", file))
+for (file in c("D8", "D14", "D21",'D28','D35')) {
+  seurat_data <- Read10X(data.dir = paste0("D:\\Datas\\scRNA_seq\\001\\", file))
   seurat_obj <- CreateSeuratObject(counts = seurat_data, min.features = 100, project = file)
   seurat_objects[[file]] <- seurat_obj
 }
-merged_seurat <- merge(seurat_objects[[1]],seurat_objects[-1],add.cell.ids = names(seurat_objects),project = 'PDAC')
-
+merged_seurat <- merge(seurat_objects[[1]],seurat_objects[-1],add.cell.ids = names(seurat_objects),project = 'hPSC')
+table(merged_seurat@meta.data$orig.ident)
 #方法2
-filename <- paste('D:\\Datas\\scRNA_seq\\PDAC\\scRNA2\\',list.files("D:\\Datas\\scRNA_seq\\PDAC\\scRNA2\\"),sep='')
-sceList <- lapply(filename, function(x){
-  obj <- CreateSeuratObject(counts = Read10X(x),
-                            min.cell = 3, min.features = 50,
-                            project = str_split(x,'\\')[1][2])
-})
-names(sceList) <- list.files('D:\\Datas\\scRNA_seq\\PDAC\\scRNA2\\')
-merged_seurat <- merge(sceList[[1]],sceList[-1],add.cell.ids = names(sceList),project = 'PDCA')
-dim(merged_seurat)
+for (file in c("D8", "D14", "D21",'D28','D35')){
+  seurat_data <- Read10X(data.dir = paste0("D:\\Datas\\scRNA_seq\\001\\", file))
+  seurat_obj <- CreateSeuratObject(counts = seurat_data,min.features = 100,
+                                   project = file)
+  assign(file, seurat_obj)
+}
+library(Seurat)
+merged_seurat <- merge(D8,c(D14,D21,D28,D35),
+                       add.cell.id = c("D8", "D14", "D21",'D28','D35'))
+remove(D8,D14,D21,D28,D35)
+table(merged_seurat@meta.data$orig.ident)
 
-###Step2 质量控制###
+
+# Step2 QC质量控制 -----------------------------------------------------
 head(merged_seurat@meta.data)
 ### Compute complexity (number of genes per UMI for each cell)(计算复杂度(每个细胞的每个 UMI 的基因数量))
 merged_seurat$log10GenesPerUMI <- log10(merged_seurat$nFeature_RNA)/log10(merged_seurat$nCount_RNA)
@@ -52,11 +38,14 @@ merged_seurat$mitoRatio <- PercentageFeatureSet(object = merged_seurat, pattern 
 # Add cell IDs to metadata(将单元格 ID 添加到元数据)
 metadata <- merged_seurat@meta.data
 metadata$cells <- substr(rownames(metadata), 13, nchar(rownames(metadata)))
-# Create sample column(创建样本列)
+#可视化
+#Create sample column(创建样本列)
 metadata$sample <- NA
-metadata$sample[which(str_detect(metadata$orig.ident, "57"))] <- "PDCA1"
-metadata$sample[which(str_detect(metadata$orig.ident, "59"))] <- "PDCA2"
-metadata$sample[which(str_detect(metadata$orig.ident, "60"))] <- "PDCA3"
+metadata$sample[which(str_detect(metadata$orig.ident, "D8"))] <- "type1"
+metadata$sample[which(str_detect(metadata$orig.ident, "D14"))] <- "type2"
+metadata$sample[which(str_detect(metadata$orig.ident, "D21"))] <- "type3"
+metadata$sample[which(str_detect(metadata$orig.ident, "D28"))] <- "type4"
+metadata$sample[which(str_detect(metadata$orig.ident, "D35"))] <- "type5"
 merged_seurat@meta.data <- metadata
 ggplot(merged_seurat@meta.data, aes(x=nCount_RNA, y=nFeature_RNA, color=mitoRatio)) +
   geom_point() +
@@ -68,22 +57,29 @@ ggplot(merged_seurat@meta.data, aes(x=nCount_RNA, y=nFeature_RNA, color=mitoRati
   geom_vline(xintercept = 500) +
   geom_hline(yintercept = 250) +
   facet_wrap(~sample)
-filtered_seurat <- subset(x = merged_seurat,subset= (nCount_RNA >= 500) &
-                            (nFeature_RNA >= 250) & (log10GenesPerUMI > 0.80) &
+#过滤低质量细胞
+filtered_seurat <- subset(x = merged_seurat,
+                          subset= (nCount_RNA >= 500) &
+                            (nFeature_RNA >= 250) & 
+                            (log10GenesPerUMI > 0.80) &
                             (mitoRatio < 0.20))
-counts <- GetAssayData(object = filtered_seurat, assay = "RNA",slot = "counts")
-
+merged_seurat <- JoinLayers(merged_seurat)
+filtered_seurat <- JoinLayers(filtered_seurat)
+counts <- filtered_seurat@assays$RNA$counts
 # Only keeping those genes expressed in more than 10 cells(只保留那些在10个以上细胞中表达的基因)
 keep_genes <- Matrix::rowSums(counts > 0) >= 10
 filtered_counts <- counts[keep_genes, ]
-# Reassign to filtered Seurat object(重新分配给过滤后的 Seurat 对象)
 filtered_seurat <- CreateSeuratObject(filtered_counts, meta.data = filtered_seurat@meta.data)
+saveRDS(filtered_seurat,'filtered_seurat.rds')
+rm(list = ls())
+filtered_seurat <- readRDS('filtered_seurat.rds')
 
-#step4 normalize(标准化)
-## remove cell cycle effect(消除细胞周期效应)
+
+# Step3 标准化 ------------------------------------------------------------------
+#消除细胞周期效应
 seurat_phase <- NormalizeData(filtered_seurat)
 # Load cell cycle markers (https://github.com/satijalab/seurat/blob/master/data/)
-load("cc.genes.updated.2019.rda")
+load("D:/Datas/scRNA_seq/cc.genes.updated.2019.rda")
 # Score cells for cell cycle(对细胞周期进行评分)
 seurat_phase <- CellCycleScoring(seurat_phase,
                                  g2m.features=cc.genes.updated.2019$g2m.genes,
@@ -99,6 +95,7 @@ seurat_phase <- ScaleData(seurat_phase)
 seurat_phase <- RunPCA(seurat_phase)
 # Plot the PCA colored by cell cycle phase
 DimPlot(seurat_phase,reduction = "pca",group.by= "Phase",split.by = "Phase")
+
 #去批次效应()
 #Harmony去批次
 library(harmony)
@@ -107,38 +104,49 @@ DimPlot(seurat_phase,reduction = 'harmony',group.by = "orig.ident")
 ElbowPlot(seurat_phase,reduction = "harmony")
 
 #细胞聚类
-seurat_phase <- FindNeighbors(seurat_phase,dims = 1:4,reduction = "harmony")
-seurat_phase <- FindClusters(seurat_phase)
-seurat_phase <- RunUMAP(seurat_phase,dims = 1:4,reduction = 'harmony')
+seurat_phase <- FindNeighbors(seurat_phase,dims = 1:10,reduction = "harmony")#dim范围为ElbowPlot趋向平坦
+seurat_phase <- FindClusters(seurat_phase, resolution = 1)
+table(seurat_phase@meta.data$seurat_clusters)
+seurat_phase <- RunUMAP(seurat_phase,dims = 1:10,reduction = 'harmony')
 
 #去批次后绘制聚类图
 DimPlot(seurat_phase,reduction = "umap", label = T, group.by = 'seurat_clusters')
 DimPlot(seurat_phase,reduction = "umap", label = T, split.by  = 'sample')
 
+#保存文件
 saveRDS(seurat_phase,"seurat_phase.rds")
-
+rm(list = ls())
 seurat_phase <- readRDS("PDCA.rds")
-###细胞注释###
-#(适用于非参数检验)
+
+
+# Step4 细胞注释 ------------------------------------------------------------------
+#方法1(适用于非参数检验)
 all_markers <- FindAllMarkers(seurat_phase, 
-                          test.use = "wilcox",  #检验方法
-                          min.pct = 0.1,        #至少一个群体中表达的细胞的最小百分比
-                          thresh.use = 0.25,    #所有群体中至少一个群体中表达的细胞的比例阈值
-                          logfc.threshold = 0.5)#因表达差异的对数折叠变化阈值
+                              test.use = "wilcox",  #检验方法
+                              min.pct = 0.5,        #至少一个群体中表达的细胞的最小百分比
+                              thresh.use = 0.25,    #所有群体中至少一个群体中表达的细胞的比例阈值
+                              logfc.threshold = 0.5)#因表达差异的对数折叠变化阈值
+write.csv(all_markers,'all_markers(Non).csv')
+#方法2(计算细胞所有差异基因)
+all_makers <- FindAllMarkers(seurat_phase, 
+                             only.pos = F,#改为True只能输出高表达基因
+                             min.pct = 0.25,
+                             logfc.threshold = 0.5)
+wirte.csv(all_markers,'all_markers(Degs).csv')
+#细胞大类区分
+genes <- c("EPCAM","KRT8","KRT19",             #Epithelial cells(上皮细胞)
+           "CD3D","CD3E","CD4",                #T cells
+           "CD19","CD79A", "MS4A1",            #B cells
+           "CD14", "CD68","FCGR3A",            #Monocytes cells(单核细胞)
+           "CDH5","PECAM1","VWF ",             #Endothelial cells(内皮细胞)
+           "COL1A1","DCN","FAP",               #Fibroblasts(成纤维细胞)
+           "ACTA2","TAGLN","CNN1",             #Smooth muscle cells(平滑肌细胞)
+           "RBFOX3","MAP2","TUBB3",            #Neurons(神经元细胞)
+           "AQP4","GFAP","S100B" )             #Glial cells(星形胶质细胞)
 
 Idents(seurat_phase) = seurat_phase$seurat_clusters
+DotPlot(seurat_phase,features = all_markers,group.by = "seurat_clusters")+coord_flip()
 
-###细胞类型分类###
-#genes <- c("EPCAM","KRT8","KRT18","KRT19",     #Epithelial cells(上皮细胞)
-           "PTPRC","CD3D",                     #T cells
-           "CD3E","CD19",                      #B cells
-           "CD14", "CD68",                     #Monocytes cells(单核细胞)
-           "CDH5","PECAM1","FLT1","KDR",       #Endothelial cells(内皮细胞)
-           "COL1A1","COL1A2","DCN","LUM",      #Fibroblasts(成纤维细胞)
-           "ACTA2","CALD1","MYH11",            #Smooth muscle cells(平滑肌细胞)
-           "RBFOX3","SNAP25","SYN1",           #Neurons(神经元细胞)
-           "AQP4","GFAP","S100B" )             #Glial cells(星形胶质细胞)
-           
 gene_maker <- c(
   "CD19","MS4A1","CD79A",       #B cells
   "IGHG1","IGHA1","JCHAIN",     #Plasma cells
@@ -172,11 +180,10 @@ gene_maker <- c(
   "GFAP", "AQP4",               #Astrocytes
   
   "PGC","PGA3","MUC5AC"         #Epithelial
-  )         
+)         
 
 DotPlot(seurat_phase,features = gene_maker,group.by = "seurat_clusters")+coord_flip()
 
-                               
 
 #确定细胞类型
 celltype = c("Lymphocytes","Mast cells","Lymphocytes",
@@ -187,7 +194,7 @@ celltype = c("Lymphocytes","Mast cells","Lymphocytes",
              "Fibroblasts","Vascular endothelial cells",
              "Myofibroblastic cancer-associated fibroblasts","Schwann cells",
              "Endothelial cells","Myofibroblastic cancer-associated fibroblasts"
-  
+             
 )
 names(celltype) <- levels(seurat_phase)
 seurat_phase <- RenameIdents(seurat_phase,celltype)
@@ -197,11 +204,14 @@ DimPlot(seurat_phase,reduction = "umap", label = T, group.by = 'celltype')
 
 #保存文件
 saveRDS(seurat_phase,"PDCA_celltype.rds")
-seurat_phase <- readRDS("PDCA_celltype.rds")
 
-###细胞比例###
+
+# Step5 细胞比例 -------------------------------------------------------------------
+rm(list = ls())
+seurat_phase <- readRDS("PDCA_celltype.rds")
 library(reshape)
 library(ggplot2)
+library(tidyverse)
 #define the colors
 library(ggsci)
 cors <- pal_igv()(16)
@@ -263,11 +273,13 @@ ggboxplot(Cellratio, x = 'group', y = 'Freq', width = 0.6,
   theme(panel.border = element_rect(colour = 'black', fill = NA))+
   #stat_compare_means(comparisons = my_comparisons, method = 't.test')#统计学检验
 dev.off()
-  
+
+
+
+# Step6 细胞类群差异分析 ------------------------------------------------------------------
 rm(list = ls()) 
 library(ggsci)
 cors <- pal_igv()(18)
-#细胞类群差异分析
 seurat_phase <- readRDS("PDCA_celltype.rds")
 #计算细胞所有差异基因
 all_makers <- FindAllMarkers(seurat_phase, 
@@ -276,7 +288,6 @@ all_makers <- FindAllMarkers(seurat_phase,
                              logfc.threshold = 0.5)
 write.csv(all_makers,file = "all_makers.csv")
 all_makers <- read.csv("all_makers.csv",row.names = 1)
-
 #联合bulk
 genes <- c("GAPDH","FN1","ALB","COL1A1","COL1A2")
 FeaturePlot(seurat_phase,features = genes)
@@ -292,7 +303,7 @@ aver_dt <- AverageExpression(seurat_phase,
                              group.by = 'celltype',
                              slot = 'data')
 aver_dt <- as.data.frame(aver_dt$RNA)
-  
+
 #heatmap
 library(ComplexHeatmap)
 mycol <- colorRampPalette(c('#4dbbd5ff','white','#e64b33ff'))(50)
@@ -318,7 +329,9 @@ pheatmap(as.matrix(aver_dt),
          border_color = 'white')
 dev.off() 
 
-###组间单细胞差异分析###
+
+
+# Step7 组间单细胞差异分析 ------------------------------------------------------------------
 ##1.pseudobulks差异分析##
 #提取某类亚型细胞的差异基因
 deg_lym <- subset(seurat_phase, celltype == "Lymphocytes"&sample %in% c('PDCA1','PDCA3'))
@@ -366,7 +379,7 @@ Idents(seurat_phase) <-  "celltype.group"
 #选择亚群进行分析比较
 #ident.1是要去比较的组(Disease),ident.2是被比较的组(Control)
 CELLDEG <- FindMarkers(seurat_phase,ident.1 = 'Lymphocytes_PDCA1',
-                                    ident.2 = 'Lymphocytes_PDCA3',
+                       ident.2 = 'Lymphocytes_PDCA3',
                        verbose = F, test.use = 'wilcox', min.pct = 0.1)
 library(dplyr)
 library(tidyverse)
@@ -377,7 +390,6 @@ CELLDEG <- CELLDEG %>%
   arrange(desc(abs(avg_log2FC))) %>% rownames_to_column('Gene_Symbol')
 table(CELLDEG$Type)
 write.csv(CELLDEG,"Lymphocytes.csv")
-
 
 #volcanoplot
 ggplot(CELLDEG,aes(avg_log2FC,
@@ -399,7 +411,7 @@ ggplot(CELLDEG,aes(avg_log2FC,
   theme_bw()+
   theme(panel.grid.major = element_blank(),
         panel.grid.minor = element_blank())
-  
+
 Idents(seurat_phase) <-  "celltype"
 top5 <- subset(top5_makers, cluster == 'Lymphocytes')$gene
 #小提琴图
@@ -410,7 +422,8 @@ DotPlot(seurat_phase, features = top5,group.by = 'sample',idents = 'Lymphocytes'
 #Umap
 FeaturePlot(seurat_phase,features = top5)
 
-###关键通路富集分析
+
+# Step8 关键通路富集分析 ------------------------------------------------------------------
 ##1. GSVA##
 library(GSVA)
 genes <- unique(rownames(seurat_phase@assays$RNA$counts))
@@ -422,6 +435,7 @@ aver_dt <- as.data.frame(aver_dt$RNA)
 aver_dt <- aver_dt[rowSums(aver_dt)>0, ]
 
 ##选择msigdb的KEGG基因应
+library(msigdbr)
 geneSet = msigdbr(species = 'Homo sapiens')#category = 'C2'
 geneSet %>% dplyr::distinct(gs_cat, gs_subcat) %>% dplyr::arrange(gs_cat, gs_subcat)
 #挑选感兴趣的基因集,主流通路/NO/ROS/衰老/自噬/线粒体
@@ -530,15 +544,15 @@ features_2 <- list(c('CD115','CD206','PPARG','ARG1','CD163','CD301','IL4R','PDL2
 
 #打分
 seurat_Lym <- AddModuleScore(seurat_LymF, 
-                            features = features_1,
-                            ctrl = 100, 
-                            name = 'Lymphocytes_features')
+                             features = features_1,
+                             ctrl = 100, 
+                             name = 'Lymphocytes_features')
 
 head(seurat_LymF@meta.data)
 colnames(seurat_LymF@meta.data)[14] <- 'Lymphocytes_Score'
 
 
-###细胞通讯
+# Step9 细胞通讯分析 ------------------------------------------------------------
 #cellchat
 #install.packages("BiocManager")
 #BiocManager::install("BiocNeighbors")
@@ -577,7 +591,4 @@ cellchat <- projectData(cellchat, PPI.human)
 
 cellchat <- computeCommunProb(cellchat, raw.use = TRUE)
 cellchat <- filterCommunication(cellchat, min.cells = 10)
-
-
-
 
