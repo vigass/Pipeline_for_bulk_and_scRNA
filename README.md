@@ -1,1 +1,1 @@
-# ***scRNA_seq pipeline*** by Roy Chaug 
+# ***Bulk_seq and scRNA_seq pipeline*** by Roy Chaug 
