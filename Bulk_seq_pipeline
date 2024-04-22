@@ -1,26 +1,27 @@
 rm(list = ls())
-setwd("D:\\Test\\COPD\\GSE47460")
+setwd("D:\\Test\\knee arthritis\\GSE66635")
 
-library(clusterProfiler)
-library(stringr)
-geneset <- read.gmt("genesets.v2023.2.Hs.gmt")
-
-x <- data.frame(list(geneset$gene))
-colnames(x) <- "genes"
-x <- unique(x)
+# library(clusterProfiler)
+# library(stringr)
+# geneset <- read.gmt("genesets.v2023.2.Hs.gmt")
+# 
+# x <- data.frame(list(geneset$gene))
+# colnames(x) <- "genes"
+# x <- unique(x)
 
 
 library(GEOquery)
-gse = "GSE47460"
+gse = "GSE66635"
 eSet <- getGEO(gse,
                destdir = '.',
                getGPL = F)
+
 exp <- exprs(eSet[[1]])
 exp[1:4,1:4]
 pd <- pData(eSet[[1]])
 gpl <- eSet[[1]]@annotation
 p = identical(rownames(pd),colnames(exp))
-save(gse,exp,pd,gpl,x,file = "step2_output.Rdata")
+save(gse,exp,pd,gpl,file = "step2_output.Rdata")
 
 rm(list = ls())
 load("step2_output.Rdata")
@@ -36,38 +37,48 @@ if(T){
   colnames(ids2) = c("probe_id","symbol")
   ids2 = ids2[ids2$symbol!="" & !str_detect(ids2$symbol,"///"),]
 }
+library(biomaRt)
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+b1 <- b %>%
+  filter(GB_ACC != "")
+
+refseq_id <- b1$GB_ACC
+genes <- getBM(attributes = c("refseq_mrna", "external_gene_name"),
+               filters = "refseq_mrna",
+               values = refseq_id,
+               mart = ensembl)
+b2 <- merge(b1,genes, by.x = 'GB_ACC', by.y = 'refseq_mrna')
+colnames(b2)[9] <-'genes'
+b3 <- b2[!is.na(b2$genes) & b2$genes !='',]
+b4 <- b3[,c('ID','genes')]
 
 exp1 <- data.frame(exp)
-exp1 <- mutate(exp1, probe_id = rownames(exp))
-exp1 <- merge(x = exp1, y = ids2, by = "probe_id")
-exp1 <- exp1[!duplicated(exp1$symbol),]
-row.names(exp1) <- exp1$symbol
+exp1 <- mutate(exp1, id = rownames(exp))
+exp1 <- merge(x = exp1, y = b4, by.x = "id", by.y = 'ID')
+exp1 <- exp1[!duplicated(exp1$genes),]
+
+row.names(exp1) <- exp1$genes
 exp1 <- exp1[,-1]
 exp1 <- exp1[,-ncol(exp1)]
 View(exp1)
-save(exp1,pd,x, file = "step3_output.Rdata")
+save(exp1,pd,b4, file = "step3_output.Rdata")
 
 rm(list = ls())
 load("step3_output.Rdata")
-#炎症模块
-exp2 <- exp1[rownames(exp1) %in% x$genes,]
 
-filtered_pd <- pd %>%
-  filter(`disease state:ch1` %in% c("Control","Chronic Obstructive Lung Disease"))
-
-exp3 <- exp2[,colnames(exp2) %in% filtered_pd$geo_accession]
-
-group_list <- str_split(as.character(filtered_pd$`disease state:ch1`),' ',simplify = T)[,1]
+group_list <- str_split(as.character(pd$`tissue:ch1`),' ',simplify = T)[,1]
 group_list <- ifelse(filtered_pd$`disease state:ch1` =="Control","Control","COPD")
-save(group_list,exp3,filtered_pd,x,file = "step4_output.Rdata")
+save(group_list,exp1,pd,file = "step4_output.Rdata")
 
 rm(list = ls())
 load("step4_output.Rdata")
 library(FactoMineR)
 library(factoextra)
+library(tidyverse)
 library(ggsci)
 cors <- pal_lancet()(5)
-dat=as.data.frame(t(exp3))
+dat=as.data.frame(t(exp1))
 dat.pca <- PCA(dat, graph = FALSE)
 
 
@@ -83,12 +94,12 @@ save(pca_plot,file = 'pca.Rdata')
 #差异分析
 library(limma)
 design=model.matrix(~group_list)
-fit=lmFit(data.frame(exp3), design)
+fit=lmFit(data.frame(exp1), design)
 fit=eBayes(fit)
 deg=topTable(fit, coef=2, number = Inf)
 deg <- mutate(deg,probe_id=rownames(deg))
 
-logFC_t= 0.5
+logFC_t= 1.5
 change=ifelse(deg$P.Value>0.05,'stable',
               ifelse(abs(deg$logFC) < logFC_t,'stable',
                      ifelse(deg$logFC >= logFC_t,'up','down') ))
@@ -96,19 +107,19 @@ deg <- mutate(deg, change)
 table(deg$change)
 
 ggplot(deg,aes(logFC,
-                   -log10(P.Value)))+
+               -log10(P.Value)))+
   geom_point(size = 3.5, 
              alpha = 0.8, 
              aes(color = change),
              show.legend = T)+
   scale_color_manual(values = c('#35d315','gray','#e64c46'))+
-  ylim(0, 20)+
-  xlim(-2, 2)+
+  ylim(0, 10)+
+  xlim(-5, 5)+
   labs(x = 'LogFC)',y = '-Log10(P.Value)')+
   geom_hline(yintercept = -log10(0.05),
              linetype = 2,
              color = 'black',lwd = 0.8)+
-  geom_vline(xintercept = c(-0.5, 0.5),
+  geom_vline(xintercept = c(-1.5, 1.5),
              linetype = 2, 
              color = 'black', lwd = 0.8)+
   theme_bw()+
@@ -117,20 +128,15 @@ ggplot(deg,aes(logFC,
 
 deg_gene <- deg$probe_id[deg$change %in% c('up','down')]
 write.csv(data.frame(deg_gene),'deg_gene.csv')
-exp4 <- exp3[rownames(exp3) %in% deg_gene,]
+write.csv(data.frame(deg),'degs.csv')
+exp2 <- exp1[rownames(exp1) %in% deg_gene,]
 
-filtered_pd$`disease state:ch1` <- factor(filtered_pd$`disease state:ch1`, 
-                                          levels = c('Control', 'Chronic Obstructive Lung Disease'))
-filtered_pd <- filtered_pd[order(filtered_pd$`disease state:ch1`), ]
-exp5 <- exp4 %>%
-  select(filtered_pd$geo_accession)
-group_list <- str_split(as.character(filtered_pd$`disease state:ch1`),' ',simplify = T)[,1]
-group_list <- ifelse(filtered_pd$`disease state:ch1` =="Control","Control","COPD")
-
-cg=names(tail(sort(apply(exp5,1,sd)),43))#SD,top50
-n=exp5[cg,]
+table(deg$change)
+cg=names(tail(sort(apply(exp2,1,sd)),23))#SD,top50
+n=exp2[cg,]
 annotation_col=data.frame(group=group_list)
 rownames(annotation_col) = colnames(n)
+
 library(pheatmap)
 heatmap_plot <- pheatmap(n,
                          show_colnames=F,
@@ -152,17 +158,24 @@ deg_gene$ENTREZID <- mapIds(org.Hs.eg.db, keys = deg_gene$deg_gene, column = 'EN
 entrez_ids <- deg_gene$ENTREZID
 entrez_ids <- entrez_ids[!is.na(entrez_ids)]
 
+#GO Enrichment
 result_bp <- enrichGO(gene = entrez_ids, OrgDb = org.Hs.eg.db, ont = "BP", pAdjustMethod = "BH", pvalueCutoff = 0.05)
 result_cc <- enrichGO(gene = entrez_ids, OrgDb = org.Hs.eg.db, ont = "CC", pAdjustMethod = "BH", pvalueCutoff = 0.05)
 result_mf <- enrichGO(gene = entrez_ids, OrgDb = org.Hs.eg.db, ont = "MF", pAdjustMethod = "BH", pvalueCutoff = 0.05)
 
-top10_bp <- head(result_bp@result, 10)
-top10_cc <- head(result_cc@result, 10)
-top10_mf <- head(result_mf@result, 10)
+bp_subset <- subset(result_bp@result, pvalue < 0.05)
+cc_subset <- subset(result_cc@result, pvalue < 0.05)
+mf_subset <- subset(result_mf@result, pvalue < 0.05)
+
+top10_bp <- head(bp_subset, 10)
+top10_cc <- head(cc_subset, 10)
+top10_mf <- head(mf_subset, 10)
 
 top10_bp$category <- 'BP'
 top10_cc$category <- 'CC'
 top10_mf$category <- 'MF'
+
+
 top10_all <- rbind(top10_bp, top10_cc, top10_mf)
 top10_all <- top10_all[order(top10_all$category, -top10_all$pvalue), ]
 top10_all$Description <- factor(top10_all$Description, levels = top10_all$Description)
@@ -174,13 +187,6 @@ ggplot(top10_all, aes(x = Description, y = -log10(pvalue), fill = category)) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1), # 调整x轴标签的角度
         legend.position = "bottom") +
   ggtitle("Top 10 GO terms across BP, CC, and MF")
-
-kegg_enrichment <- enrichKEGG(gene         = entrez_ids,
-                              organism     = 'hsa', # hsa代表Homo sapiens
-                              pAdjustMethod= "BH",
-                              pvalueCutoff = 0.05,
-                              qvalueCutoff = 0.2)
-
 # GO富集结果可视化(气泡图)
 go_dotplot_bp <- dotplot(result_bp) + ggtitle("GO Enrichment Analysis - BP") +
   theme(legend.position = "right")
@@ -188,24 +194,98 @@ go_dotplot_cc <- dotplot(result_cc) + ggtitle("GO Enrichment Analysis - CC") +
   theme(legend.position = "right")
 go_dotplot_mf <- dotplot(result_mf) + ggtitle("GO Enrichment Analysis - MF") +
   theme(legend.position = "right")
-
-# KEGG富集结果可视化(气泡图)
-kegg_dotplot <- dotplot(kegg_enrichment) + ggtitle("KEGG Pathway Enrichment Analysis")
-print(kegg_dotplot)
 go_dotplot_bp
 go_dotplot_cc
 go_dotplot_mf
+#KEGG enrichment
+kegg_enrichment <- enrichKEGG(gene         = entrez_ids,
+                              organism     = 'hsa', # hsa代表Homo sapiens
+                              pAdjustMethod= "BH",
+                              pvalueCutoff = 0.05,
+                              qvalueCutoff = 0.2)
 
+# KEGG富集结果可视化(气泡图)
+kegg_dotplot <- dotplot(kegg_enrichment) + ggtitle("KEGG Pathway Enrichment Analysis") +
+  theme(legend.position = "right")
+print(kegg_dotplot)
 
-#WGCNA免疫模块
+#CIBERSORT免疫浸润
 rm(list = ls())
-load("step3_output.Rdata")
+load("step4_output.Rdata")
+library('devtools')##devtools::install_github("Moonerss/CIBERSORT")
+library(CIBERSORT)
+library(reader)
+library(ggplot2)
+library(reshape2)
+library(ggpubr)
+library(dplyr)
+library(ggsci)
+cors <- pal_lancet()(2)
+data("LM22")
+TME.results <- cibersort(LM22,exp1,perm = 0,QN = F)
+group_list
+TME_data <- as.data.frame(TME.results[,1:22])
+TME_data$group <- group_list
+TME_data$sample <- row.names(TME_data)
+TME_New = melt(TME_data)
+colnames(TME_New)=c("Group","Sample","Celltype","Composition")  #设置行名
+head(TME_New)
+plot_order = TME_New[TME_New$Group=="injured",] %>% 
+  group_by(Celltype) %>% 
+  summarise(m = median(Composition)) %>% 
+  arrange(desc(m)) %>% 
+  pull(Celltype)
+TME_New$Celltype = factor(TME_New$Celltype,levels = plot_order)
+
+if(T){
+  mytheme <- theme(plot.title = element_text(size = 12,color="black",hjust = 0.5),
+                   axis.title = element_text(size = 12,color ="black"), 
+                   axis.text = element_text(size= 12,color = "black"),
+                   panel.grid.minor.y = element_blank(),
+                   panel.grid.minor.x = element_blank(),
+                   axis.text.x = element_text(angle = 45, hjust = 1 ),
+                   panel.grid=element_blank(),
+                   legend.position = "top",
+                   legend.text = element_text(size= 12),
+                   legend.title= element_text(size= 12)
+  ) }
+
+box_TME <- ggplot(TME_New, aes(x = Celltype, y = Composition))+ 
+  labs(y="Cell composition",x= NULL,title = "TME Cell composition")+  
+  geom_boxplot(aes(fill = Group),position=position_dodge(0.5),width=0.6,outlier.alpha = 0)+ 
+  scale_fill_manual(values = cors)+
+  theme_classic() + mytheme + 
+  stat_compare_means(aes(group =  Group),
+                     label = "p.signif",
+                     method = "wilcox.test",
+                     hide.ns = T)
+box_TME
+ggsave("ACC_TME.pdf",box_TME,height=15,width=25,unit="cm")
+
+TME_four = as.data.frame(TME.results[,1:20])
+head(TME_four,3)
+
+#相关性分析
+library(ggcorrplot)
+library(corrplot)
+library(seriation)#install.packages("seriation")
+TME_four1 <- TME_four[,-c(10,20)]
+corrmatrix <- cor(TME_four1, method = "pearson")
+testRes = cor.mtest(TME_four1, conf.level = 0.95)
+pdf("CIBERSORT_cor.pdf", width = 8, height = 8)
+corrplot(corrmatrix, tl.col = 'black', p.mat = testRes$p,  order = 'hclust',
+         insig = 'label_sig', sig.level = c(0.001, 0.01, 0.05),
+         pch.cex = 0.9, pch.col = 'grey20',type = 'lower')
+dev.off()
+
+#WGCNA
+rm(list = ls())
+load("step4_output.Rdata")
 library(tidyverse)
-filtered_pd2 <- pd %>%
-  filter(`disease state:ch1`=='Chronic Obstructive Lung Disease')
-exp_wgcna <- exp1[,colnames(exp1) %in% filtered_pd2$geo_accession]
-samples <- filtered_pd2[,c("geo_accession","disease state:ch1")]
-samples$group <- ifelse(samples$`disease state:ch1`=="Chronic Obstructive Lung Disease","1","0")
+exp_wgcna <- exp1[,colnames(exp1) %in% pd$geo_accession]
+samples <- pd[,c("geo_accession","tissue:ch1")]
+samples$group <- ifelse(samples$`tissue:ch1`=="injured meniscus","1","0")
+rownames(samples) <- seq_len(nrow(samples))
 
 library(WGCNA)
 dataExpr <- exp_wgcna
@@ -218,11 +298,11 @@ gsg = goodSamplesGenes(dataExpr, verbose = 3)
 
 if(!gsg$allOK){
   if(sum(!gsg$goodGenes)>0)
-     printFlush(paste("Removing genes:",
-                      paste(names(dataExpr)[!gsg$goodGenes], collapse = ",")));
+    printFlush(paste("Removing genes:",
+                     paste(names(dataExpr)[!gsg$goodGenes], collapse = ",")));
   if(sum(!gsg$goodSamples)>0)
-     printFlush(paste("Removing samples:",
-                      paste(rownames(dataExpr)[!gsg$goodSamples], collapse = ",")));
+    printFlush(paste("Removing samples:",
+                     paste(rownames(dataExpr)[!gsg$goodSamples], collapse = ",")));
   dataExpr = dataExpr[gsg$goodSamples, gsg$goodGenes]
 }
 nGenes = ncol(dataExpr)
@@ -240,17 +320,15 @@ nSamples = nrow(datExpr)
 
 plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5, cex.axis = 1.5, cex.main = 2) +
   #想用哪里切，就把“h = 110”和“cutHeight = 110”中换成你的cutoff
- abline(h = 150, col = "red") 
+  abline(h = 150, col = "red") 
 clust = cutreeStatic(sampleTree, cutHeight = 150, minSize = 10)
 keepSamples = (clust==1)
 datExpr = dataExpr[keepSamples, ]
 nGenes = ncol(datExpr)
 nSamples = nrow(datExpr)
 datExpr=as.data.frame(datExpr)
-sample_to_delete <- c("GSM1150187", "GSM1150220")
-samples <- samples[!samples$geo_accession %in% sample_to_delete,]
-
-
+# sample_to_delete <- c("GSM1150187", "GSM1150220")
+# samples <- samples[!samples$geo_accession %in% sample_to_delete,]
 
 powers = c(c(1:10), seq(from = 12, to=20, by=2))
 
@@ -258,13 +336,13 @@ sft = pickSoftThreshold(datExpr, powerVector = powers,
                         verbose = 5 )
 pdf("1Threshold.pdf",width = 9, height = 5)
 par(mfrow = c(1,2))
-cex1 = 0.9
+cex1 = 0.8
 plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
      xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
      main = paste("Scale independence")) +
   text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
        labels=powers,cex=cex1,col="red")+
-  abline(h=0.9,col="red")
+  abline(h=0.8,col="red")
 plot(sft$fitIndices[,1], sft$fitIndices[,5],
      xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
      main = paste("Mean connectivity")) +
@@ -272,7 +350,7 @@ plot(sft$fitIndices[,1], sft$fitIndices[,5],
 dev.off()
 
 #构建网络，找出gene module
-net = blockwiseModules(datExpr, power = 4,
+net = blockwiseModules(datExpr, power = 8,
                        TOMType = "unsigned", minModuleSize = 100,
                        reassignThreshold = 0, mergeCutHeight = 0.25,
                        numericLabels = TRUE, pamRespectsDendro = FALSE,
@@ -284,7 +362,7 @@ table(net$colors)
 mergedColors = labels2colors(net$colors)
 pdf("2module.pdf",width = 10, height = 5)
 plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]], "Module colors",
-                    dendroLabels = FALSE, hang = 0.03,
+                    dendroLabels = FALSE, hang = 0.03, 
                     addGuide = TRUE, guideHang = 0.05)
 dev.off()
 moduleLabels = net$colors
@@ -300,33 +378,74 @@ for (i  in 1:length(text)) {
   write.csv(y,paste(text[i],"csv",sep = "."),quote = F)
 }
 
-
 #表型与模块的相关性
 moduleLabelsAutomatic = net$colors
 moduleColorsAutomatic = labels2colors(moduleLabelsAutomatic)
 moduleColorsWW = moduleColorsAutomatic
 MEs0 = moduleEigengenes(datExpr, moduleColorsWW)$eigengenes
 MEsWW = orderMEs(MEs0)
-modTraitCor = cor(MEsWW,samples, use = "p")
+
+design <- model.matrix(~0+factor(group_list))
+colnames(design)=levels(factor(group_list))
+rownames(design)=colnames(exp1)
+modTraitCor = cor(MEsWW,design, use = "p")
+
 colnames(MEsWW)
 modlues=MEsWW
 nSamples <- ncol(datExpr)
 modTraitP = corPvalueStudent(modTraitCor, nSamples)
 textMatrix = paste(signif(modTraitCor, 2), "\n(", signif(modTraitP, 1), ")", sep = "")
+
 dim(textMatrix) = dim(modTraitCor)
 
 pdf("3Module-trait.pdf",width = 6, height = 6)
-labeledHeatmap(Matrix = MEsWW, 
-               xLabels = rep("", ncol(MEsWW)), 
+labeledHeatmap(Matrix = modTraitCor, 
+               xLabels = colnames(design), 
                yLabels = names(MEsWW), cex.lab = 0.5,  yColorWidth=0.01, 
                xColorWidth = 0.03,
-               ySymbols = colnames(modules), 
+               ySymbols = colnames(modlues), 
                colorLabels = FALSE, colors = blueWhiteRed(50), 
                textMatrix = textMatrix, 
-               setStdMargins = FALSE, cex.text = 0.5, zlim = c(-1,1)
-               , main = paste("Module-trait relationships"))
-
+               setStdMargins = FALSE, cex.text = 0.5, zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
 dev.off()
+
+#veen
+rm(list = ls())
+exp_cors <- read.csv('turquoise.csv',row.names = 1)
+wgcna_genes <- rownames(exp_cors)
+exp_deg <- read.csv('deg_gene.csv',row.names = 1)
+deg_genes <- exp_deg$deg_gene
+library (VennDiagram)  #install.packages("VennDiagram")
+library(openxlsx) #install.packages("openxlsx")
+library(ggsci)
+cors <- pal_aaas()(6)
+venn.diagram(x=list(wgcna_genes,deg_genes),
+             scaled = F, # 根据比例显示大小
+             alpha= 0.5, #透明度
+             lwd=1,lty=1,col=c('#3B4992FF','#EE0000FF'), #圆圈线条粗细、形状、颜色；1 实线, 2 虚线, blank无线条
+             label.col ='black' , # 数字颜色abel.col=c('#FFFFCC','#CCFFFF',......)根据不同颜色显示数值颜色
+             cex = 2, # 数字大小
+             fontface = "bold",  # 字体粗细；加粗bold
+             fill=c('#3B4992FF','#EE0000FF'), # 填充色 配色https://www.58pic.com/
+             category.names = c("WGCNA_genes", "Deg_genes") , #标签名
+             cat.dist = 0.02, # 标签距离圆圈的远近
+             cat.pos = -180, # 标签相对于圆圈的角度cat.pos = c(-10, 10, 135)
+             cat.cex = 2, #标签字体大小
+             cat.fontface = "bold",  # 标签字体加粗
+             cat.col='black' ,   #cat.col=c('#FFFFCC','#CCFFFF',.....)根据相应颜色改变标签颜色
+             cat.default.pos = "outer",  # 标签位置, outer内;text 外
+             output=TRUE,
+             filename='Veen.png',# 文件保存
+             imagetype="png",  # 类型（tiff png svg
+             resolution = 400,  # 分辨率
+             compression = "lzw"# 压缩算法
+)
+
+
+
+
+
 
 
 
