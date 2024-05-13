@@ -1,0 +1,477 @@
+rm(list = ls())
+setwd("D:\\Test\\TCGA\\Test")
+
+# Step1 数据下载与清洗 -----------------------------------------------------------
+library("rjson")#install.packages("rjson")
+library(jsonlite)#install.packages("jsonlite")
+json <- jsonlite::fromJSON("metadata.cart.2024-05-07.json")
+# View(json)
+#id <- json$associated_entities[[1]][,1]
+sample_id <- sapply(json$associated_entities, function(x){x[, 1]})
+file_sample <- data.frame(sample_id, file_name=json$file_name)  
+
+#count_file <- list.files('gdc_download_20xxxxxx_xxxxxx.xxxxxx', pattern = '*.tsv',recursive = TRUE)
+count_file <- list.files('gdc_download_20240507_061209.969511', pattern = '*gene_counts.tsv', recursive = TRUE)
+count_file_name <- strsplit(count_file, split='/')
+count_file_name <- sapply(count_file_name, function(x){x[2]})
+matrix = data.frame(matrix(nrow=60660, ncol=0))
+for (i in 1:length(count_file_name)){
+  path = paste0('gdc_download_20240507_061209.969511//', count_file[i])
+  data<- read.delim(path, fill = TRUE, header = FALSE, row.names = 1)
+  colnames(data)<-data[2, ]
+  data <-data[-c(1:6), ]
+  data <- data[3] #取出unstranded列（得到COUNT矩阵），若想提取fpkm-unstranded则改为data[7]，fpkm-up-unstranded改为data[8]
+  colnames(data) <- file_sample$sample_id[which(file_sample$file_name==count_file_name[i])]
+  matrix <- cbind(matrix, data)
+}
+
+# write.csv(matrix, 'COUNT_matrix.csv', row.names = TRUE)
+
+path = paste0('gdc_download_20240507_061209.969511//', count_file[1])
+data<- as.matrix(read.delim(path, fill = TRUE, header = FALSE, row.names = 1))
+gene_name <-data[-c(1:6), 1]
+matrix0 <- cbind(gene_name, matrix)
+#将gene_name列去除重复的基因，保留每个基因最大表达量结果
+matrix0 <- aggregate( . ~ gene_name, data=matrix0, max)    
+#将gene_name列设为行名
+rownames(matrix0) <- matrix0[, 1]
+matrix0 <- matrix0[, -1]
+# write.csv(matrix0, 'Gene_Symbol_matrix.csv', row.names = TRUE)
+
+sample <- colnames(matrix0)
+
+normal <- c()
+tumor <- c()
+
+for (i in 1:length(sample)){
+  if((substring(colnames(matrix0)[i], 14, 15)>10)){    #14、15位置大于10的为normal样本
+    normal <- append(normal, sample[i])
+  } else {
+    tumor <- append(tumor, sample[i])
+  }
+}
+
+tumor_matrix <- matrix0[, tumor]
+normal_matrix <- matrix0[, normal]
+# write.csv(tumor_matrix, 'Gene_Symbol_tumor_matrix.csv', row.names = TRUE)
+# write.csv(normal_matrix, 'Gene_Symbol_normal_matrix.csv', row.names = TRUE)
+# library("rjson")
+# json <- jsonlite::fromJSON("metadata.cart.2024-05-07.json")
+View(json)
+entity_submitter_id <- sapply(json$associated_entities, function(x){x[, 1]})
+case_id <- sapply(json$associated_entities, function(x){x[, 3]})
+sample_case <- t(rbind(entity_submitter_id, case_id))
+
+clinical <- read.delim('clinical.cart.2024-05-07\\clinical.tsv', header = T)
+clinical <- as.data.frame(clinical[duplicated(clinical$case_id), ])
+
+clinical_matrix <- merge(sample_case, clinical, by="case_id", all.x=T)
+clinical_matrix <- clinical_matrix[, -1]
+# write.csv(clinical_matrix, 'clinical_matrix.csv', row.names = TRUE)
+
+save(matrix0, clinical_matrix, file = 'step1_output.Rdata')
+
+
+# Step2 筛选表达矩阵 -------------------------------------------------------------
+rm(list = ls())
+load('step1_output.Rdata')
+samples <- as.data.frame(colnames(matrix0))
+colnames(samples) <- 'samples'
+samples$group <- NA
+samples$group <- ifelse(as.integer(substr(samples$samples, 14, 15)) < 10, 'tumor', 'normal')
+samples$group <- factor(samples$group, levels = c('normal', 'tumor'))
+samples <- samples[order(samples$group), ]
+
+sample_indices <- match(samples$samples, colnames(matrix0))
+exp <- matrix0[, sample_indices]
+
+library(clusterProfiler)
+library(stringr)
+geneset <- read.gmt("OXIDATIVE_STRESS.v2023.2.Hs.gmt")
+
+x <- data.frame(list(geneset$gene))
+colnames(x) <- "genes"
+x <- unique(x)
+
+exp_OS <- exp[rownames(exp) %in% x$genes,]
+group_list <- samples$group
+
+save(exp_OS, group_list, samples, file = 'step2_output.Rdata')
+
+
+# Step3 差异基因筛选 ------------------------------------------------------------
+rm(list = ls())
+load('step2_output.Rdata')
+exp_OS[] <- lapply(exp_OS, as.numeric)
+#DESeq2包
+library(DESeq2)
+# if (!require("BiocManager", quietly = TRUE))
+# install.packages("BiocManager")
+# BiocManager::install("DESeq2")
+#筛掉count矩阵中全部为0的基因
+nonzero_genes <- rowSums(exp_OS != 0) > 0
+exp_OS <- exp_OS[nonzero_genes, ]
+
+condition = factor(group_list) #levels = c("normal", "tumor")
+coldata <- data.frame(row.names = colnames(exp_OS), condition)
+
+dds <- DESeqDataSetFromMatrix(countData = exp_OS, colData = coldata, design = ~  condition)
+dds <- DESeq(dds)	
+result <- as.data.frame(results(dds))
+result$genes <- rownames(result)
+log2FC_t= 1
+change=ifelse(result$pvalue>0.05,'Stable',
+              ifelse(abs(result$log2FoldChange) < log2FC_t,'Stable',
+                     ifelse(result$log2FoldChange >= log2FC_t,'Up','Down') ))
+result <- mutate(result, change)
+table(result$change)
+write.csv(result,'result.csv')
+
+#Volcano Plot
+library(ggplot2)
+volcano_plot <- ggplot(result,aes(log2FoldChange,
+                       -log10(pvalue)))+
+          geom_point(size = 3.5, 
+                    alpha = 0.8, 
+                    aes(color = change),
+                    show.legend = T)+
+          scale_color_manual(values = c('#35d315','gray','#e64c46'))+
+          ylim(0, 300)+
+          xlim(-10, 10)+
+          labs(x = 'LogFC',y = '-Log10(P.Value)')+
+          geom_hline(yintercept = -log10(0.05),
+                    linetype = 2,
+                    color = 'black',lwd = 0.8)+
+          geom_vline(xintercept = c(-1, 1),
+                    linetype = 2, 
+                    color = 'black', lwd = 0.8)+
+            theme_bw()+
+            theme(panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank())
+print(volcano_plot)
+
+#Heatmap Plot
+library(pheatmap)#install.packages("pheatmap")
+library(ggplot2)
+deg_genes <- result %>%
+  filter(change %in% c('Up', 'Down'))
+exp_deg <- exp_OS[rownames(exp_OS) %in% deg_genes$genes,]
+table(deg_genes$change)
+cg=names(tail(sort(apply(exp_deg,1,sd)),113))#SD,top50
+n=exp_deg[cg,]
+annotation_col=data.frame(group=group_list)
+rownames(annotation_col) = colnames(n)
+
+library(pheatmap)
+# library(ggsci)
+# cors <- pal_cosmic()(5)
+heatmap_plot <- pheatmap(n,
+                         show_colnames=F,
+                         show_rownames = F,
+                         annotation_col = annotation_col,
+                         scale = "row",
+                         # color = cors, 
+                         cluster_cols = FALSE)
+print(heatmap_plot)
+save(deg_genes, samples, exp_OS,  file = 'step3_output.Rdata')
+save('volcano_plot','heatmap_plot', file = 'DEGs_plot.Rdata')
+
+
+# Step4 富集分析 --------------------------------------------------------------
+rm(list = ls())
+load('step3_output.Rdata')
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+#测试
+test_genes <- c("CETN2", "FZD4", "BBS1", "TSGA10", "SLC38A3", "PAXIP1")
+ego_test <- enrichGO(gene = test_genes,
+                     OrgDb = org.Hs.eg.db,
+                     keyType = "SYMBOL",
+                     ont = "BP",
+                     pAdjustMethod = "BH",
+                     qvalueCutoff = 0.05)
+
+print(ego_test)
+gene <- deg_genes$genes
+#GO富集
+#BP模块
+GO_BP<-enrichGO( gene = gene,
+                 OrgDb = org.Hs.eg.db,
+                 keyType = "SYMBOL",
+                 ont = "BP",
+                 pvalueCutoff = 0.05,
+                 pAdjustMethod = "BH",
+                 qvalueCutoff = 0.05,
+                 minGSSize = 10,
+                 maxGSSize = 500,
+                 readable = T)
+#CC模块
+GO_CC<-enrichGO( gene = gene,
+                 OrgDb = org.Hs.eg.db,
+                 keyType = "SYMBOL",
+                 ont = "CC",
+                 pvalueCutoff = 0.05,
+                 pAdjustMethod = "BH",
+                 qvalueCutoff = 0.05,
+                 minGSSize = 10,
+                 maxGSSize = 500,
+                 readable = T)
+#MF模块
+GO_MF<-enrichGO( gene = gene,
+                 OrgDb = org.Hs.eg.db,
+                 keyType = "SYMBOL",
+                 ont = "MF",
+                 pvalueCutoff = 0.05,
+                 pAdjustMethod = "BH",
+                 qvalueCutoff = 0.05,
+                 minGSSize = 10,
+                 maxGSSize = 500,
+                 readable = T)
+ego_result_BP <- as.data.frame(GO_BP)
+ego_result_CC <- as.data.frame(GO_CC)
+ego_result_MF <- as.data.frame(GO_MF)
+# ego <- rbind(ego_result_BP,ego_result_CC,ego_result_MF)#或者这样也能得到ego_ALL一样的结果
+# ego_ALL <- as.data.frame(ego)
+# write.csv(ego_ALL,file = "ego_ALL.csv",row.names = T)
+write.csv(ego_result_BP,file = "ego_result_BP.csv",row.names = T)
+write.csv(ego_result_CC,file = "ego_result_CC.csv",row.names = T)
+write.csv(ego_result_MF,file = "ego_result_MF.csv",row.names = T)
+
+display_number = c(10, 10, 10)#这三个数字分别代表选取的BP、CC、MF的通路条数，这个自己设置就行了
+ego_result_BP <- as.data.frame(GO_BP)[1:display_number[1], ]
+ego_result_CC <- as.data.frame(GO_CC)[1:display_number[2], ]
+ego_result_MF <- as.data.frame(GO_MF)[1:display_number[3], ]
+
+go_enrich_df <- data.frame(
+  ID=c(ego_result_BP$ID, ego_result_CC$ID, ego_result_MF$ID),                        
+  Description=c(ego_result_BP$Description,ego_result_CC$Description,ego_result_MF$Description),
+  GeneNumber=c(ego_result_BP$Count, ego_result_CC$Count, ego_result_MF$Count),
+  type=factor(c(rep("biological process", display_number[1]), 
+                rep("cellular component", display_number[2]),
+                rep("molecular function", display_number[3])), 
+              levels=c("biological process", "cellular component","molecular function" )))
+for(i in 1:nrow(go_enrich_df)){
+  description_splite=strsplit(go_enrich_df$Description[i],split = " ")
+  description_collapse=paste(description_splite[[1]][1:5],collapse = " ") #这里的5就是指5个单词的意思，可以自己更改
+  go_enrich_df$Description[i]=description_collapse
+  go_enrich_df$Description=gsub(pattern = "NA","",go_enrich_df$Description)
+}
+
+##开始绘制GO柱状图
+###横着的柱状图
+go_enrich_df$type_order=factor(rev(as.integer(rownames(go_enrich_df))),labels=rev(go_enrich_df$Description))
+#这一步是必须的，为了让柱子按顺序显示，不至于很乱
+COLS <- c("#66C3A5", "#8DA1CB", "#FD8D62")#设定颜色
+
+ggplot(data=go_enrich_df, aes(x=type_order,y=GeneNumber, fill=type)) + #横纵轴取值
+  geom_bar(stat="identity", width=0.8) + #柱状图的宽度，可以自己设置
+  scale_fill_manual(values = COLS) + ###颜色
+  coord_flip() + ##这一步是让柱状图横过来，不加的话柱状图是竖着的
+  xlab("GO term") + 
+  ylab("Gene_Number") + 
+  labs(title = "Top 10 GO terms across BP, CC, and MF")+
+  theme_bw()
+
+###竖着的柱状图 
+go_enrich_df$type_order=factor(rev(as.integer(rownames(go_enrich_df))),labels=rev(go_enrich_df$Description))
+COLS <- c("#66C3A5", "#8DA1CB", "#FD8D62")
+ggplot(data=go_enrich_df, aes(x=type_order,y=GeneNumber, fill=type)) + 
+  geom_bar(stat="identity", width=0.8) + 
+  scale_fill_manual(values = COLS) + 
+  theme_bw() + 
+  xlab("GO term") + 
+  ylab("Num of Genes") + 
+  labs(title = "Top 10 GO terms across BP, CC, and MF")+ 
+  theme(axis.text.x=element_text(face = "bold", color="gray50",angle = 60,vjust = 1, hjust = 1 ))
+  #angle是坐标轴字体倾斜的角度，可以自己设置
+
+#KEGG富集
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+gene <- deg_genes$genes
+
+# 确保'genes'是包含基因符号的字符向量
+gene_mapping <- AnnotationDbi::select(org.Hs.eg.db, 
+                                      keys = gene, 
+                                      keytype = "SYMBOL", 
+                                      columns = "ENTREZID")
+
+KEGG <- enrichKEGG(gene         = gene_mapping$ENTREZID,
+                   organism     = 'hsa', 
+                   keyType      = 'kegg', 
+                   pAdjustMethod = "BH", 
+                   qvalueCutoff = 0.05)
+print(KEGG)
+write.csv(KEGG,'kegg.csv',row.names = TRUE)
+#画图1
+#柱状图
+barplot(KEGG,showCategory = 10,title = 'KEGG Pathway')
+#点状图
+dotplot(KEGG)
+
+#画图2
+kk <- KEGG
+###柱状图
+hh <- as.data.frame(kk)
+rownames(hh) <- 1:nrow(hh)
+hh$order=factor(rev(as.integer(rownames(hh))),labels = rev(hh$Description))
+ggplot(hh,aes(y=order,x=Count,fill=p.adjust))+
+  geom_bar(stat = "identity",width=0.7)+####柱子宽度
+  #coord_flip()+##颠倒横纵轴
+  scale_fill_gradient(low = "red",high ="blue" )+#颜色自己可以换
+  labs(title = "KEGG Pathways Enrichment",
+       x = "Gene numbers", 
+       y = "Pathways")+
+  theme(axis.title.x = element_text(face = "bold",size = 16),
+        axis.title.y = element_text(face = "bold",size = 16),
+        legend.title = element_text(face = "bold",size = 16))+
+  theme_bw()
+###气泡图
+hh <- as.data.frame(kk)
+rownames(hh) <- 1:nrow(hh)
+hh$order=factor(rev(as.integer(rownames(hh))),labels = rev(hh$Description))
+ggplot(hh,aes(y=order,x=Count))+
+  geom_point(aes(size=Count,color=-1*p.adjust))+# 修改点的大小
+  scale_color_gradient(low="green",high = "red")+
+  labs(color=expression(p.adjust,size="Count"), 
+       x="Gene Number",y="Pathways",title="KEGG Pathway Enrichment")+
+  theme_bw()
+
+
+
+# Step5 WGCNA分析 -----------------------------------------------------------
+rm(list = ls())
+load('step3_output.Rdata')
+rm(deg_genes)
+group_list <- samples$group
+table(group_list)
+suppressMessages(library(limma))
+design <- model.matrix(~0+factor(group_list))
+colnames(design)=levels(factor(group_list))
+rownames(design)=colnames(exp_OS)
+design <- data.frame(design)
+
+
+
+library(WGCNA)
+options(stringsAsFactors = FALSE)  #开启多线程
+datExpr0 = as.data.frame(t(exp_OS))
+#检查缺失值和识别离群值（异常值）
+gsg = goodSamplesGenes(datExpr0, verbose = 3)
+gsg$allOK
+#gsg$allOK结果为True，进行下一步
+#结果FALSE,进行if后续
+if (!gsg$allOK)
+{
+  # Optionally, print the gene and sample names that were removed:
+  if (sum(!gsg$goodGenes)>0)
+    printFlush(paste("Removing genes:", paste(names(datExpr0)[!gsg$goodGenes], collapse = ", ")));
+  if (sum(!gsg$goodSamples)>0)
+    printFlush(paste("Removing samples:", paste(rownames(datExpr0)[!gsg$goodSamples], collapse = ", ")));
+  # Remove the offending genes and samples from the data:
+  datExpr0 = datExpr0[gsg$goodSamples, gsg$goodGenes]
+}
+
+sampleTree = hclust(dist(datExpr0), method = "average")
+sizeGrWindow(12,9) #视图
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5,
+     cex.axis = 1.5, cex.main = 2)
+#观察图像有无离群值
+#有则继续,无则跳过
+
+#删除离群样本
+abline(h = 15, col = "red") #划定需要剪切的枝长
+clust = cutreeStatic(sampleTree, cutHeight = 15, minSize = 10)
+#这时候会从高度为15这里横切，把离群样本分开
+table(clust)   
+keepSamples = (clust==1)  #保留非离群(clust==1)的样本
+datExpr = datExpr0[keepSamples, ]  #去除离群值后的数据
+nGenes = ncol(datExpr)
+nSamples = nrow(datExpr)
+
+#不删除离群样本
+datExpr <- datExpr0
+#构建自动化网络和检测模块
+powers = c(c(1:10), seq(from = 12, to=20, by=2))
+sft = pickSoftThreshold(datExpr, powerVector = powers,
+                        verbose = 5 )
+pdf("1Threshold.pdf",width = 9, height = 5)
+par(mfrow = c(1,2))
+cex1 = 0.9
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence")) +
+  text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+       labels=powers,cex=cex1,col="red")+
+  abline(h=0.9,col="red")
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity")) +
+  text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+dev.off()
+sft$powerEstimate
+#如果显示的结果为 NA，则表明系统无法给出合适的软阈值，这时候就需要自己挑选软阈值。
+
+#一步法构建网络和模块检测
+net = blockwiseModules(datExpr, power = 5,
+                       TOMType = "unsigned", minModuleSize = 10,
+                       reassignThreshold = 0, mergeCutHeight = 0.25,
+                       numericLabels = TRUE, pamRespectsDendro = FALSE,
+                       saveTOMs = TRUE,
+                       saveTOMFileBase = "femaleMouseTOM",
+                       verbose = 3)
+# power = 5是刚才选择的软阈值
+#minModuleSize：模块中最少的基因数
+#mergeCutHeight ：模块合并阈值，阈值越大，模块越少（重要）
+#saveTOMs = TRUE,saveTOMFileBase = "femaleMouseTOM"保存TOM矩阵，名字为"femaleMouseTOM"
+#net$colors 包含模块分配，net$MEs 包含模块的模块特征基因。
+table(net$colors)
+mergedColors = labels2colors(net$colors)
+pdf("2module.pdf",width = 10, height = 5)
+plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]], "Module colors",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+dev.off()
+moduleLabels = net$colors
+moduleColors = labels2colors(net$colors)
+MEs = net$MEs;
+geneTree = net$dendrograms[[1]]
+
+#把gene module输出到文件
+text <- unique(moduleColors)
+for (i  in 1:length(text)) {
+  y=t(assign(paste(text[i],"expr",sep = "."),
+             datExpr[moduleColors==text[i]]))
+  write.csv(y,paste(text[i],"csv",sep = "."),quote = F)
+}
+
+#模块与表型数据关联并识别重要基因
+moduleLabelsAutomatic = net$colors
+moduleColorsAutomatic = labels2colors(moduleLabelsAutomatic)
+moduleColorsWW = moduleColorsAutomatic
+MEs0 = moduleEigengenes(datExpr, moduleColorsWW)$eigengenes
+MEsWW = orderMEs(MEs0)
+modTraitCor = cor(MEsWW,design, use = "p")
+colnames(MEsWW)
+modlues=MEsWW
+nSamples <- ncol(datExpr)
+modTraitP = corPvalueStudent(modTraitCor, nSamples)
+textMatrix = paste(signif(modTraitCor, 2), "\n(", signif(modTraitP, 1), ")", sep = "")
+dim(textMatrix) = dim(modTraitCor)
+
+pdf("3Module-trait.pdf",width = 6, height = 6)
+labeledHeatmap(Matrix = modTraitCor, 
+               xLabels = colnames(design), 
+               yLabels = names(MEsWW), cex.lab = 0.5,  yColorWidth=0.01, 
+               xColorWidth = 0.03,
+               ySymbols = colnames(modlues), 
+               colorLabels = FALSE, colors = blueWhiteRed(50), 
+               textMatrix = textMatrix, 
+               setStdMargins = FALSE, cex.text = 0.5, zlim = c(-1,1)
+               , main = paste("Module-trait relationships"))
+dev.off()
+rm(list = ls())
