@@ -474,4 +474,105 @@ labeledHeatmap(Matrix = modTraitCor,
                setStdMargins = FALSE, cex.text = 0.5, zlim = c(-1,1)
                , main = paste("Module-trait relationships"))
 dev.off()
+
+
+
+# Step6 机器学习 ------------------------------------------------------------------
 rm(list = ls())
+load('step3_output.Rdata')
+veen <- read.csv('jVenn.csv')
+
+exp_ml <- exp_OS[rownames(exp_OS) %in% veen$MEblue.DEGs,]
+
+ml <- data.frame(t(exp_ml))
+samples$group <- ifelse(samples$group == 'normal', '0', '1')
+
+x <- data.frame(cbind(group = samples$group, ml))
+
+y=data.matrix(x$group)
+y <- as.factor(y)
+x <- as.matrix(x[,-1])
+
+###Lasso
+library(glmnet)
+set.seed(111)
+fit=glmnet(x,y,family = "binomial",maxit = 10000)
+plot(fit,xvar="lambda",label = TRUE)
+
+cvfit = cv.glmnet(x,y,family="binomia",maxit = 10000, nfolds = 10)
+plot(cvfit)
+
+coef=coef(fit,s = cvfit$lambda.min)
+index=which(coef != 0)
+actCoef=coef[index]
+lassoGene=row.names(coef)[index]
+geneCoef=cbind(Gene=lassoGene,Coef=actCoef)#查看模型的相关系数geneCoef
+geneCoef
+
+lassoGene <- lassoGene[-1]
+actCoef<- actCoef[-1]
+# write.table(geneCoef,file = "geneCoef.txt",sep = "\t",
+#             row.names = F,col.names = F,quote = )
+write.csv(geneCoef, file = 'geneCoef.csv')
+
+###randomForest
+library(randomForest)
+set.seed(100)
+rf <- randomForest(y~.,  data = x , ntree = 500)
+plot(rf, main = 'Random Forest', lwd = 2)
+
+optionTrees = which.min(rf$err.rate[, 1])
+#rf2 = randomForest(y~., data = x, ntree = optionTrees, importance = T)
+rf2 = randomForest(y~., data = x, ntree = optionTrees)
+importance = importance(x = rf2)
+varImpPlot(rf2, main = 'Feature Importance')
+rfGenes = importance[order(importance[, 'MeanDecreaseGini'], decreasing = T), ]
+rfGenes = names(rfGenes[rfGenes > 6])
+rfGenes
+# write.table(rfGenes, 'random_genes.txt', sep = "\t",
+#             row.names = F, col.names = F, quote = )
+write.csv(rfGenes, file = 'random_genes.csv')
+
+save(geneCoef, rfGenes, exp_ml, samples, file = 'machine_learn.Rdata')
+
+
+
+# Step7 ROC验证 -------------------------------------------------------------
+rm(list = ls())
+load('machine_learn.Rdata')
+veen <- read.csv('Venn_end.csv')
+genes <- veen$Lasso.RandomForest.MEblue.DEGs[1:6]
+
+roc_exp <- as.matrix(exp_ml[genes, ])
+# roc_exp<-exp_ml[match(genes,rownames (exp_ml)),]
+# samples$group <- ifelse(samples$group == "0", 'normal', 'tumor')
+samples$group <- factor(samples$group)
+library(ggsci)
+cors <- pal_lancet()(6)
+
+library(pROC)
+roc_results <- list()
+for (gene in genes) {
+  # 提取当前基因的表达值
+  predictor <- roc_exp[gene, ]
+  # 计算 ROC
+  roc_obj <- roc(response = samples$group, predictor = predictor)
+  # 将 ROC 对象保存到列表中
+  roc_results[[gene]] <- roc_obj
+  # 打印 AUC 值
+  cat("Gene:", gene, "AUC:", auc(roc_obj), "\n")
+}
+plot(roc_results[[1]], col = cors[1], lwd = 2, 
+     main = "ROC Curves for Multiple Genes", 
+     ylim = c(0, 1), xlim = c(0, 1))
+abline(a = 0, b = 1, lwd = 2, lty = 2, col = "red")
+for (i in seq_along(roc_results)) {
+  lines(roc_results[[i]], col = cors[i], lwd = 2)
+}
+legend("bottomright", legend = names(roc_results), col = cors, lwd = 2, bty = "n")
+for (i in seq_along(roc_results)) {
+  text(x = 1, y = 1 - 0.05 * i, 
+       labels = paste(names(roc_results)[i], "AUC =", round(auc(roc_results[[i]]), 2)), 
+       col = cors[i], cex = 1.2, pos = 4)
+}
+
