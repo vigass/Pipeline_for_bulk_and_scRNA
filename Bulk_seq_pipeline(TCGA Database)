@@ -564,15 +564,18 @@ for (gene in genes) {
 }
 plot(roc_results[[1]], col = cors[1], lwd = 2, 
      main = "ROC Curves for Multiple Genes", 
+     xlab = "False Positive Rate (1 - Specificity)", 
+     ylab = "True Positive Rate (Sensitivity)", 
      ylim = c(0, 1), xlim = c(0, 1))
 abline(a = 0, b = 1, lwd = 2, lty = 2, col = "red")
 for (i in seq_along(roc_results)) {
   lines(roc_results[[i]], col = cors[i], lwd = 2)
 }
 legend("bottomright", legend = names(roc_results), col = cors, lwd = 2, bty = "n")
+
 for (i in seq_along(roc_results)) {
-  text(x = 1, y = 1 - 0.05 * i, 
-       labels = paste(names(roc_results)[i], "AUC =", round(auc(roc_results[[i]]), 2)), 
+  text(x = 1.0, y = 1 - 0.05 * i, 
+       labels = paste(names(roc_results)[i], "AUC = ", round(auc(roc_results[[i]]), 2)), 
        col = cors[i], cex = 1.2, pos = 4)
 }
 
