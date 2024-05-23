@@ -294,6 +294,10 @@ ggplot(data=go_enrich_df, aes(x=type_order,y=GeneNumber, fill=type)) +
   labs(title = "Top 10 GO terms across BP, CC, and MF")+ 
   theme(axis.text.x=element_text(face = "bold", color="gray50",angle = 60,vjust = 1, hjust = 1 ))
 #angle是坐标轴字体倾斜的角度，可以自己设置
+#气泡图
+dotplot(GO_BP, title = 'GO Enrichment Analysis - BP')
+dotplot(GO_CC, title = 'GO Enrichment Analysis - CC')
+dotplot(GO_MF, title = 'GO Enrichment Analysis - MF')
 
 #KEGG富集
 library(AnnotationDbi)
@@ -318,7 +322,7 @@ write.csv(KEGG,'kegg.csv',row.names = TRUE)
 #柱状图
 barplot(KEGG,showCategory = 10,title = 'KEGG Pathway')
 #点状图
-dotplot(KEGG)
+dotplot(KEGG, title = 'KEGG Pathway')
 
 #画图2
 kk <- KEGG
