@@ -269,7 +269,7 @@ head(TME_four,3)
 library(ggcorrplot)
 library(corrplot)
 library(seriation)#install.packages("seriation")
-TME_four1 <- TME_four[,-c(10,20)]
+TME_four1 <- TME_four[,-c(10,22)]
 corrmatrix <- cor(TME_four1, method = "pearson")
 testRes = cor.mtest(TME_four1, conf.level = 0.95)
 pdf("CIBERSORT_cor.pdf", width = 8, height = 8)
