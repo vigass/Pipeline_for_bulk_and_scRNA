@@ -18,6 +18,7 @@ eSet <- getGEO(gse,
 
 exp <- exprs(eSet[[1]])
 exp[1:4,1:4]
+summary(exp1)
 pd <- pData(eSet[[1]])
 gpl <- eSet[[1]]@annotation
 p = identical(rownames(pd),colnames(exp))
