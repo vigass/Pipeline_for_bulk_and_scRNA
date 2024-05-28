@@ -44,7 +44,7 @@ normal <- c()
 tumor <- c()
 
 for (i in 1:length(sample)){
-  if((substring(colnames(matrix0)[i], 14, 15)>10)){    #14、15位置大于10的为normal样本
+  if((substring(colnames(matrix0)[i], 14, 15)>=10)){    #14、15位置大于10的为normal样本
     normal <- append(normal, sample[i])
   } else {
     tumor <- append(tumor, sample[i])
