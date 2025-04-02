@@ -95,6 +95,11 @@ seurat_phase <- ScaleData(seurat_phase)
 seurat_phase <- RunPCA(seurat_phase)
 # Plot the PCA colored by cell cycle phase
 DimPlot(seurat_phase,reduction = "pca",group.by= "Phase",split.by = "Phase")
+# 保留G1期细胞
+# seurat_phase <- subset(seurat_phase, subset = Phase == "G1")
+# 去除细胞周期的影响
+seurat_phase <- ScaleData(seurat_phase, vars.to.regress = c("S.Score", "G2M.Score"))
+
 
 #去批次效应()
 #Harmony去批次
